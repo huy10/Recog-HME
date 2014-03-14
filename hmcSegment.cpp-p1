@@ -1,0 +1,1201 @@
+static short GetMinDistance(unsigned short uStrokePntData[], short nStrokePntNum, 
+					 short x, short y)
+{
+	short i, j;
+	short deltaX, deltaY, dist;
+	short minDist = 10000;
+	for (i = j = 0; i < nStrokePntNum && uStrokePntData[j] != 0xffff && 
+		uStrokePntData[j+1] != 0xffff; i++, j += 2)
+	{
+		deltaX = (short)uStrokePntData[j] - x;
+		deltaY = (short)uStrokePntData[j+1] - y;
+		dist = abs(deltaX) + abs(deltaY);
+		if (dist < minDist)
+		{
+			minDist = dist;
+		}
+	}
+	return minDist;
+}
+
+static short GetMinDistance2(unsigned short uStrokePntData1[], short nStrokePntNum1, 
+					  unsigned short uStrokePntData2[], short nStrokePntNum2)
+{
+	short i,j;
+	short deltaX, deltaY, dist, minDist = 10000;
+
+	for (i = 0; i < nStrokePntNum1; i++)
+	{
+		for (j = 0; j < nStrokePntNum2; j++)
+		{
+			deltaX = abs(uStrokePntData1[2*i] - uStrokePntData2[2*j]);
+			if (deltaX < minDist)
+			{
+				deltaY = abs(uStrokePntData1[2*i+1] - uStrokePntData2[2*j+1]);
+				if (deltaY < minDist)
+				{
+					dist = deltaX + deltaY;
+					if (dist < minDist)
+					{
+						minDist = dist;
+					}
+				}
+			}
+		}
+	}
+	return minDist;
+}
+
+static void GetOneFrameFeature(unsigned short uPntData1[], 					short nPntNum1,
+						unsigned short uPntData2[],						short nPntNum2,
+						const short nDim,						char * pRecogRam,
+						short *pLda, short * pFeature)
+{
+	int i, j;
+	unsigned short uNewPntData[HCR_MAX_POINT_DATA_COUNT];
+	unsigned char *pU8PntData;
+
+	int nNewPntNum, nNewPntDataNum = 0;
+	WTParameter *pGlobalParameter;
+	short *pOrigFeature, *pCompFeature;
+	short feature[HCR_MAX_STROKE * HCR_GMM_DIM];
+	short *m_pFeature = &feature[0];
+
+
+	for (i = 0; i < nPntNum1 * 2; i++)
+	{
+		uNewPntData[nNewPntDataNum++] = uPntData1[i];
+	}
+	uNewPntData[nNewPntDataNum++] = 0xffff;         //huyang-2013-08-09
+	uNewPntData[nNewPntDataNum++] = 0;
+	if (nPntNum2 > 0)
+	{
+		for (i = 0; i < nPntNum2 * 2; i++)
+		{
+			uNewPntData[nNewPntDataNum++] = uPntData2[i];
+		}
+		uNewPntData[nNewPntDataNum++] = 0xffff;  //huyang-2013-08-09
+		uNewPntData[nNewPntDataNum++] = 0;
+	}
+	uNewPntData[nNewPntDataNum++] = 0xffff;    //huyang-2013-08-09
+	uNewPntData[nNewPntDataNum++] = 0xffff;
+	nNewPntNum = nNewPntDataNum / 2;
+
+	// recognize stroke
+	//WTNormData(uNewPntData, (short)nNewPntNum, pRecogRam); 
+	// find max x and y
+	unsigned short max_x = 0, max_y = 0;
+	for (int i = 0; i < nNewPntDataNum; i++)
+	{
+		if (uNewPntData[i] > max_x && i % 2==0 && uNewPntData[i]!= 0xffff )
+			max_x = uNewPntData[i];
+		if (uNewPntData[i] > max_y && i % 2==1  && uNewPntData[i]!= 0xffff)
+			max_y = uNewPntData[i];
+	}
+	unsigned short max_coordinate = (max_x > max_y)?max_x:max_y;
+	pU8PntData = new unsigned char[nNewPntDataNum];
+	for (int i = 0; i < nNewPntDataNum; i++)
+	{
+		if (uNewPntData[i] != 0xffff)
+		pU8PntData[i] =(unsigned char)(uNewPntData[i]* 0xfe /max_coordinate );
+		else
+			pU8PntData[i] = 0xff;
+		
+	}
+	
+	//pU8PntData = (unsigned char*)&uNewPntData[0];
+
+	//Norm(pU8PntData, 0, pRecogRam);  
+	//OnlineNorm(pU8PntData,  0, pRecogRam);        // edited by huyang
+
+	//ExtractFeature(pU8PntData, 1, pRecogRam); //plr-2013-08-06
+
+	FILE * fp1;
+	fp1= fopen("C:\\yanghu\\oneframe.pot","ab");
+	unsigned short BlockSize,code,NumberOfByteOccupied;
+
+	NumberOfByteOccupied =nNewPntDataNum;
+    BlockSize = NumberOfByteOccupied+6;
+	code = 0x30;
+
+	DebugCountNum++;
+	if (DebugCountNum == 20)
+		BlockSize = NumberOfByteOccupied+6;
+	if(fp1!=NULL)
+	{
+	fwrite(&BlockSize,sizeof(unsigned short),1,fp1);
+	fwrite(&code,sizeof(unsigned short),1,fp1);
+	unsigned short a=0;
+	fwrite(&a,sizeof(unsigned short),1,fp1);
+
+	fwrite(pU8PntData,sizeof(unsigned char),NumberOfByteOccupied,fp1);
+	}
+	fclose(fp1);
+	short xx = ExtractOnlineEightDirectionFeature(pU8PntData, (short)nNewPntNum,m_pFeature ,pRecogRam  );  // huyang m_pFeature
+
+	pGlobalParameter = (WTParameter *)(	pRecogRam + GLOBAL_PARAMETER_POSITION);
+	pOrigFeature = (short *)pRecogRam;
+	pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+
+	
+	
+	for(i=0;i<nDim;i++)
+	{
+		float sum=0;
+		/*	进行LDA变换，得到压缩后的特征	*/
+		for(j=0;j<OLXCR_O_FEATURE_DIM;j++)
+		{
+			sum+=pLda[i*OLXCR_O_FEATURE_DIM+j]*pOrigFeature[j];    // huyang
+		}
+		//assert(sum > -32767 && sum < 32767);
+		pCompFeature[i] = (short)sum;
+	}
+	delete [] pU8PntData;
+}
+
+static int ExtractGmmFeature(unsigned short uPntData[], unsigned short unPntNum, 
+					  short *pFeature, char *pGlobalRam, short *pLda)
+{
+	char *pRecogRam = pGlobalRam + HCR_RAM_OFFSET_FOR_OLCCR_RAM;
+	
+	StrokeInfo2 strokeInfo[HCR_MAX_STROKE];
+	long fea;
+	short x1, x2, y1, y2;
+	int i, j;
+	short* pCompFeature;
+	short *pPreFea, *pCurFea;
+	int nPre, nCur;
+	RectInfo rcPre, rcCur, rcGrand;
+	int w1, h1, w2, h2, W, H, WH, wh1, wh2;
+	unsigned short uFeaNum = 0;
+
+	unsigned short uStrokeNum = 
+		GetStrokeStruInfobyPnt(uPntData, unPntNum, strokeInfo);
+
+	// 外接矩形框尺寸规整
+	//BBXSizeNormalize(strokeInfo, uStrokeNum);
+
+	if (uStrokeNum < 2)
+	{
+		return 0;
+	}
+
+	pPreFea = 0;
+	pCurFea = pFeature;
+
+	i = 0;
+	nPre = i;
+	nCur = i+1;
+
+	rcPre = strokeInfo[nPre].rectOneStroke;
+	rcCur = strokeInfo[nCur].rectOneStroke;
+
+	// FS700-15A特征提取所需辅助数据
+	w1 = (int)(rcPre.unXBottom - rcPre.unXTop) + 1;
+	w2 = (int)(rcCur.unXBottom - rcCur.unXTop) + 1;
+	h1 = (int)(rcPre.unYBottom - rcPre.unYTop) + 1;
+	h2 = (int)(rcCur.unYBottom - rcCur.unYTop) + 1;
+	wh1 = max(w1, h1);
+	wh2 = max(w2, h2);
+	x1 = (short)min(rcPre.unXTop, rcCur.unXTop);
+	x2 = (short)max(rcPre.unXBottom, rcCur.unXBottom);
+	W = (int)(x2 - x1) + 1;
+	y1 = (short)min(rcPre.unYTop, rcCur.unYTop);
+	y2 = (short)max(rcPre.unYBottom, rcCur.unYBottom);
+	H = (int)(y2 - y1) + 1;
+	WH = max(W, H);
+
+
+	// 前笔划归一化宽度 0
+	fea = w1 * DOUBLE_RATE / WH;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后笔划归一化宽度 1
+	fea = w2 * DOUBLE_RATE / WH;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 前笔划宽高比 2
+	fea = w1 * DOUBLE_RATE / h1;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后笔划宽高比 3
+	fea = w2 * DOUBLE_RATE / h2;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 合并后宽高比 4
+	fea = W * DOUBLE_RATE / H;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 水平归一化距离 5
+	if (rcPre.unXBottom < rcCur.unXTop)
+	{
+		fea = rcCur.unXTop - rcPre.unXBottom;
+	}
+	else if (rcPre.unXTop > rcCur.unXBottom)
+	{
+		fea = rcPre.unXTop - rcCur.unXBottom;
+	}
+	else
+	{
+		x1 = (short)max(rcPre.unXTop, rcCur.unXTop);
+		x2 = (short)min(rcPre.unXBottom, rcCur.unXBottom);
+		fea = x1 - x2;
+	}
+	fea = fea * DOUBLE_RATE / W;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 垂直归一化距离 6
+	if (rcPre.unYBottom < rcCur.unYTop)
+	{
+		fea = rcCur.unYTop - rcPre.unYBottom;
+	}
+	else if (rcPre.unYTop > rcCur.unYBottom)
+	{
+		fea = rcPre.unYTop - rcCur.unYBottom;
+	}
+	else
+	{
+		y1 = (short)max(rcPre.unYTop, rcCur.unYTop);
+		y2 = (short)min(rcPre.unYBottom, rcCur.unYBottom);
+		fea = y1 - y2;
+	}
+	fea = fea * DOUBLE_RATE / /*W*/H;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 归一化笔划间最小距离 7
+	fea = GetMinDistance2(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+		(short)strokeInfo[nPre].unStrokePtNum, 
+		&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+		(short)strokeInfo[nCur].unStrokePtNum);
+	fea = fea * DOUBLE_RATE / WH;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后笔划与前笔划点数之比 8
+	//fea = strokeInfo[nCur].unStrokePtNum * DOUBLE_RATE / strokeInfo[nPre].unStrokePtNum;
+	//pCurFea[uFeaNum++] = (short)fea;
+
+	// 笔划中心水平归一化距离 9
+	fea = strokeInfo[nCur].nCenterX - strokeInfo[nPre].nCenterX;
+	fea = abs(fea);
+	fea = fea * DOUBLE_RATE / W;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 笔划中心竖直归一化距离 10
+	fea = strokeInfo[nCur].nCenterY - strokeInfo[nPre].nCenterY;
+	fea = abs(fea);
+	fea = fea * DOUBLE_RATE / H;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 前前笔划水平归一化距离 11
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+
+	// 前前笔划竖直归一化距离 12
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+
+	// 后后笔划水平归一化距离 13
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+
+	// 后后笔划竖直归一化距离 14
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+
+	// 旧特征补入
+	// the 1st frame
+	// NOTE: short小心越界
+	// 前笔划的宽
+	fea = rcPre.unXBottom - rcPre.unXTop;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后笔划的宽
+	fea = (long)rcCur.unXBottom - (long)rcCur.unXTop;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 前笔划的高
+	fea = (long)rcPre.unYBottom - (long)rcPre.unYTop;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后笔划的高
+	fea = (short)rcCur.unYBottom - (short)rcCur.unYTop;
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 合并后的宽
+	x1 = min(rcPre.unXTop, rcCur.unXTop);
+	x2 = max(rcPre.unXBottom, rcCur.unXBottom);
+	fea = (long)(x2 - x1);
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 合并后的高
+	x1 = min(rcPre.unYTop, rcCur.unYTop);
+	x2 = max(rcPre.unYBottom, rcCur.unYBottom);
+	fea = (long)(x2 - x1);
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// x距离
+	if (rcPre.unXBottom < rcCur.unXTop)
+	{
+		fea = rcCur.unXTop - rcPre.unXBottom;
+	}
+	else if (rcPre.unXTop > rcCur.unXBottom)
+	{
+		fea = rcPre.unXTop - rcCur.unXBottom;
+	}
+	else
+	{
+		x1 = (short)max(rcPre.unXTop, rcCur.unXTop);
+		x2 = (short)min(rcPre.unXBottom, rcCur.unXBottom);
+		fea = x1 - x2;
+	}
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// y距离
+	if (rcPre.unYBottom < rcCur.unYTop)
+	{
+		fea = rcCur.unYTop - rcPre.unYBottom;
+	}
+	else if (rcPre.unYTop > rcCur.unYBottom)
+	{
+		fea = rcPre.unYTop - rcCur.unYBottom;
+	}
+	else
+	{
+		y1 = (short)max(rcPre.unYTop, rcCur.unYTop);
+		y2 = (short)min(rcPre.unYBottom, rcCur.unYBottom);
+		fea = y1 - y2;
+	}
+	pCurFea[uFeaNum++] = (short)fea;
+
+	// 后一笔起点距离前一笔的最小距离
+	/*fea = GetMinDistance(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+	(short)strokeInfo[nPre].unStrokePtNum, 
+	(short)uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+	(short)uPntData[strokeInfo[nCur].unStrokeStartPt*2+1]);
+	pCurFea[uFeaNum++] = (short)fea;*/
+
+	// 笔划间最小距离
+	fea = GetMinDistance2(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+		(short)strokeInfo[nPre].unStrokePtNum, 
+		&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+		(short)strokeInfo[nCur].unStrokePtNum);
+	pCurFea[uFeaNum++] = (short)fea;
+
+	//// prev stroke length
+	//pCurFea[uFeaNum++] = (short)strokeInfo[nPre].unStrokePtNum;
+
+	//// current stroke length
+	//pCurFea[uFeaNum++] = (short)strokeInfo[nCur].unStrokePtNum;
+
+	//// 2 strokes' length
+	//pCurFea[uFeaNum++] = (short)(strokeInfo[nPre].unStrokePtNum + 
+	//	strokeInfo[nCur].unStrokePtNum);
+
+	// center-x distance
+	fea = strokeInfo[nCur].nCenterX - strokeInfo[nPre].nCenterX;
+	fea = abs(fea);
+	pCurFea[uFeaNum++] = (short)fea;
+
+#if 1
+	// 前前笔划x距离
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+
+	// 后后笔划x距离
+	pCurFea[uFeaNum++] = IMPOSSIBLE_X_DISTANCE;
+#endif
+
+	// OLXCR features
+	GetOneFrameFeature(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+		(short)strokeInfo[nPre].unStrokePtNum, 0, 0, 
+		HCR_GMM_STRU_FEA_DIM_1, pRecogRam, pLda, pFeature);
+	pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+	for (j = 0; j < HCR_GMM_STRU_FEA_DIM_1; j++)
+	{
+		pCurFea[uFeaNum++] = pCompFeature[j];
+	}
+
+	GetOneFrameFeature(&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+		(short)strokeInfo[nCur].unStrokePtNum, 0, 0, 
+		HCR_GMM_STRU_FEA_DIM_1, pRecogRam, pLda,pFeature);
+	pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+	for (j = 0; j < HCR_GMM_STRU_FEA_DIM_1; j++)
+	{
+		pCurFea[uFeaNum++] = pCompFeature[j];
+	}
+
+	GetOneFrameFeature(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+		(short)strokeInfo[nPre].unStrokePtNum, 
+		&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+		(short)strokeInfo[nCur].unStrokePtNum, 
+		HCR_GMM_STRU_FEA_DIM_2, pRecogRam, pLda,pFeature);
+	pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+	for (j = 0; j < HCR_GMM_STRU_FEA_DIM_2; j++)
+	{
+		pCurFea[uFeaNum++] = pCompFeature[j];
+	}
+
+
+	pPreFea = pCurFea;
+	pCurFea += HCR_GMM_DIM;
+	rcGrand = rcPre;
+	rcPre = rcCur;
+	i++;
+
+	while (i+1 < (int)uStrokeNum)
+	{
+		nPre = i;
+		nCur = i+1;
+		//assert(nPre >= 0 && nPre < (int)uStrokeNum);
+		//assert(nCur >= 0 && nCur < (int)uStrokeNum);
+		rcCur = strokeInfo[nCur].rectOneStroke;
+
+		uFeaNum = 0;
+
+		w1 = (int)(rcPre.unXBottom - rcPre.unXTop) + 1;
+		w2 = (int)(rcCur.unXBottom - rcCur.unXTop) + 1;
+		h1 = (int)(rcPre.unYBottom - rcPre.unYTop) + 1;
+		h2 = (int)(rcCur.unYBottom - rcCur.unYTop) + 1;
+		wh1 = max(w1, h1);
+		wh2 = max(w2, h2);
+		x1 = (short)min(rcPre.unXTop, rcCur.unXTop);
+		x2 = (short)max(rcPre.unXBottom, rcCur.unXBottom);
+		W = (int)(x2 - x1) + 1;
+		y1 = (short)min(rcPre.unYTop, rcCur.unYTop);
+		y2 = (short)max(rcPre.unYBottom, rcCur.unYBottom);
+		H = (int)(y2 - y1) + 1;
+		WH = max(W, H);
+
+		// 前笔划归一化宽度 0
+		fea = w1 * DOUBLE_RATE / WH;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 后笔划归一化宽度 1
+		fea = w2 * DOUBLE_RATE / WH;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 前笔划宽高比 2
+		fea = w1 * DOUBLE_RATE / h1;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 后笔划宽高比 3
+		fea = w2 * DOUBLE_RATE / h2;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 合并后宽高比 4
+		fea = W * DOUBLE_RATE / H;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 水平归一化距离 5
+		if (rcPre.unXBottom < rcCur.unXTop)
+		{
+			fea = rcCur.unXTop - rcPre.unXBottom;
+		}
+		else if (rcPre.unXTop > rcCur.unXBottom)
+		{
+			fea = rcPre.unXTop - rcCur.unXBottom;
+		}
+		else
+		{
+			x1 = (short)max(rcPre.unXTop, rcCur.unXTop);
+			x2 = (short)min(rcPre.unXBottom, rcCur.unXBottom);
+			fea = x1 - x2;
+		}
+		fea = fea * DOUBLE_RATE / W;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 垂直归一化距离 6
+		if (rcPre.unYBottom < rcCur.unYTop)
+		{
+			fea = rcCur.unYTop - rcPre.unYBottom;
+		}
+		else if (rcPre.unYTop > rcCur.unYBottom)
+		{
+			fea = rcPre.unYTop - rcCur.unYBottom;
+		}
+		else
+		{
+			y1 = (short)max(rcPre.unYTop, rcCur.unYTop);
+			y2 = (short)min(rcPre.unYBottom, rcCur.unYBottom);
+			fea = y1 - y2;
+		}
+		fea = fea * DOUBLE_RATE / /*W*/ H;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 归一化笔划间最小距离 7
+		fea = GetMinDistance2(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+			(short)strokeInfo[nPre].unStrokePtNum, 
+			&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+			(short)strokeInfo[nCur].unStrokePtNum);
+		fea = fea * DOUBLE_RATE / WH;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		//// 后笔划与前笔划点数之比 8
+		//fea = strokeInfo[nCur].unStrokePtNum * DOUBLE_RATE / strokeInfo[nPre].unStrokePtNum;
+		//pCurFea[uFeaNum++] = (short)fea;
+
+		// 笔划中心水平归一化距离 9
+		fea = strokeInfo[nCur].nCenterX - strokeInfo[nPre].nCenterX;
+		fea = abs(fea);
+		fea = fea * DOUBLE_RATE / W;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 笔划中心竖直归一化距离 10
+		fea = strokeInfo[nCur].nCenterY - strokeInfo[nPre].nCenterY;
+		fea = abs(fea);
+		fea = fea * DOUBLE_RATE / H;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 前前笔划水平归一化距离 11
+		pCurFea[uFeaNum++] = pPreFea[5];
+
+		// 前前笔划竖直归一化距离 12
+		pCurFea[uFeaNum++] = pPreFea[6];
+
+		// 后后笔划水平归一化距离 13
+		pPreFea[uFeaNum++] = pCurFea[5];
+
+		// 后后笔划竖直归一化距离 14
+		pPreFea[uFeaNum++] = pCurFea[6];
+
+		// 旧特征补入
+		// NOTE: short小心越界
+		// 前笔划的宽
+		pCurFea[uFeaNum] = pPreFea[uFeaNum+1];
+		uFeaNum++;
+
+		// 后笔划的宽
+		fea = (long)rcCur.unXBottom - (long)rcCur.unXTop;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 前笔划的高
+		pCurFea[uFeaNum] = pPreFea[uFeaNum+1];
+		uFeaNum++;
+
+		// 后笔划的高
+		fea = (short)rcCur.unYBottom - (short)rcCur.unYTop;
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 合并后的宽
+		x1 = min(rcPre.unXTop, rcCur.unXTop);
+		x2 = max(rcPre.unXBottom, rcCur.unXBottom);
+		fea = (long)(x2 - x1);
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// 合并后的高
+		x1 = min(rcPre.unYTop, rcCur.unYTop);
+		x2 = max(rcPre.unYBottom, rcCur.unYBottom);
+		fea = (long)(x2 - x1);
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// x距离
+		if (rcPre.unXBottom < rcCur.unXTop)
+		{
+			fea = rcCur.unXTop - rcPre.unXBottom;
+		}
+		else if (rcPre.unXTop > rcCur.unXBottom)
+		{
+			fea = rcPre.unXTop - rcCur.unXBottom;
+		}
+		else
+		{
+			x1 = (short)max(rcPre.unXTop, rcCur.unXTop);
+			x2 = (short)min(rcPre.unXBottom, rcCur.unXBottom);
+			fea = x1 - x2;
+		}
+		pCurFea[uFeaNum++] = (short)fea;
+
+		// y距离
+		if (rcPre.unYBottom < rcCur.unYTop)
+		{
+			fea = rcCur.unYTop - rcPre.unYBottom;
+		}
+		else if (rcPre.unYTop > rcCur.unYBottom)
+		{
+			fea = rcPre.unYTop - rcCur.unYBottom;
+		}
+		else
+		{
+			y1 = (short)max(rcPre.unYTop, rcCur.unYTop);
+			y2 = (short)min(rcPre.unYBottom, rcCur.unYBottom);
+			fea = y1 - y2;
+		}
+		pCurFea[uFeaNum++] = (short)fea;
+
+		//		// 后一笔起点距离前一笔的最小距离
+		//		fea = GetMinDistance(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+		//			(short)strokeInfo[nPre].unStrokePtNum, 
+		//			(short)uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+		//			(short)uPntData[strokeInfo[nCur].unStrokeStartPt*2+1]);
+		//#ifdef SIZE_NORM
+		//		fea = (fea << NORMED_HEIGHT_BITS) / nCoreHeight;
+		//#endif
+		//		pCurFea[uFeaNum++] = (short)fea;
+		//
+		// 笔划间最小距离
+		fea = GetMinDistance2(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+			(short)strokeInfo[nPre].unStrokePtNum, 
+			&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+			(short)strokeInfo[nCur].unStrokePtNum);
+		pCurFea[uFeaNum++] = (short)fea;
+
+		//		// prev stroke length
+		//		pCurFea[uFeaNum] = pPreFea[uFeaNum+1];
+		//		uFeaNum++;
+		//
+		//		// current stroke length
+		//		pCurFea[uFeaNum++] = (short)strokeInfo[nCur].unStrokePtNum;
+		//
+		//		// 2 strokes' length
+		//		pCurFea[uFeaNum++] = (short)(strokeInfo[nPre].unStrokePtNum + 
+		//			strokeInfo[nCur].unStrokePtNum);
+
+		// center-x distance
+		fea = strokeInfo[nCur].nCenterX - strokeInfo[nPre].nCenterX;
+		fea = abs(fea);
+		pCurFea[uFeaNum++] = (short)fea;
+
+#if 1
+		// 前前笔划x距离
+		pCurFea[uFeaNum++] = pPreFea[19];
+
+		// 后后笔划x距离
+		pPreFea[uFeaNum++] = pCurFea[19];
+#endif
+
+		GetOneFrameFeature(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+			(short)strokeInfo[nPre].unStrokePtNum, 0, 0, 
+			HCR_GMM_STRU_FEA_DIM_1, pRecogRam, pLda,pFeature);
+		pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+		for (j = 0; j < HCR_GMM_STRU_FEA_DIM_1; j++)
+		{
+			pCurFea[uFeaNum++] = pCompFeature[j];
+		}
+
+		GetOneFrameFeature(&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+			(short)strokeInfo[nCur].unStrokePtNum, 0, 0, 
+			HCR_GMM_STRU_FEA_DIM_1, pRecogRam, pLda,pFeature);
+		pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+		for (j = 0; j < HCR_GMM_STRU_FEA_DIM_1; j++)
+		{
+			pCurFea[uFeaNum++] = pCompFeature[j];
+		}
+
+		GetOneFrameFeature(&uPntData[strokeInfo[nPre].unStrokeStartPt*2], 
+			(short)strokeInfo[nPre].unStrokePtNum, 
+			&uPntData[strokeInfo[nCur].unStrokeStartPt*2], 
+			(short)strokeInfo[nCur].unStrokePtNum, 
+			HCR_GMM_STRU_FEA_DIM_2, pRecogRam, pLda,pFeature);
+		pCompFeature = (short *)(pRecogRam + 2 * OLXCR_O_FEATURE_DIM);
+		for (j = 0; j < HCR_GMM_STRU_FEA_DIM_2; j++)
+		{
+			pCurFea[uFeaNum++] = pCompFeature[j];
+		}
+
+		pPreFea = pCurFea;
+		pCurFea += HCR_GMM_DIM;
+		rcGrand = rcPre;
+		rcPre = rcCur;
+		i++;
+	}
+
+#if 1
+	// the last stroke: 后后笔划x距离
+	pPreFea[HCR_GMM_BASE_FEA_DIM - 1] = IMPOSSIBLE_X_DISTANCE;
+	pPreFea[12] = IMPOSSIBLE_X_DISTANCE;
+	pPreFea[13] = IMPOSSIBLE_X_DISTANCE;
+#endif
+
+	return (int)(uStrokeNum - 1);
+}
+
+static void FeatureExtractionAndScore(unsigned short uPointData[],
+							   unsigned short uPointNum,
+							   float fCombineScore[], 
+							   int nStrokeCount, 
+							   char* pGlobalRam)
+{
+	PGLOBALPARAMHCR pGlobalParam = (PGLOBALPARAMHCR)(
+		pGlobalRam + HCR_RAM_OFFSET_FOR_GLOBAL_PARAM);
+	PGMMMODELHCR pGmmModel = &pGlobalParam->gmmModel;
+	short *pLda = pGlobalParam->gmmModel.pLDA;
+
+	// definitions of locals
+	int nCharIdPerStroke[HCR_MAX_STROKE];
+	int nStrokeNum = nStrokeCount;
+	int i;
+	int nFrameNum;
+	int nRawStrokeID1, nRawStrokeID2;
+	int nRawCharID1, nRawCharID2;
+	int nSampleNum = 0;
+
+	int nTypeNum[2] = {0, 0};
+
+	// remove malloc
+	short feature[HCR_MAX_STROKE * HCR_GMM_DIM];
+	short *pFeature = &feature[0];
+	float normFea[HCR_GMM_DIM];
+
+	nSampleNum++;
+	//printf("sample %d...\n", nSampleNum);
+
+	//assert(nStrokeNum > 0);
+
+	nFrameNum = ExtractGmmFeature(uPointData, uPointNum, pFeature, pGlobalRam, pLda);
+
+	for (i = 0; i < nFrameNum; i++)
+	{
+		nRawStrokeID1 = i;
+		nRawStrokeID2 = i+1;
+		nRawCharID1 = nCharIdPerStroke[nRawStrokeID1];
+		nRawCharID2 = nCharIdPerStroke[nRawStrokeID2];
+	}
+
+	// Normalization and scoring
+	for (i = 0; i < nStrokeCount - 1; ++i)	// Split point after the i'th stroke
+	{
+		int FeatureOffset = i * HCR_GMM_DIM;
+		short* pCurFea = pFeature + FeatureOffset;
+		int j, mix, dim;
+		float px, bx, sum, xmm;
+		float *pCurGmmMean, *pCurGmmVar;
+		float scoreOfSeg, scoreOfConj;
+
+		for (j = 0; j < HCR_GMM_DIM; ++j)
+		{
+			if (pCurFea[j] == IMPOSSIBLE_X_DISTANCE)
+				normFea[j] = 0.0;
+			else
+				normFea[j] = ((float)pCurFea[j] - pGmmModel->pFeatureMean[j]) * pGmmModel->pFeatureVar[j];
+		}
+
+		bx = HCR_FMIN;
+		pCurGmmMean = pGmmModel->pSegMean;
+		pCurGmmVar = pGmmModel->pSegVar;
+		for (mix = 0; mix < HCR_GMM_MIX; mix++)
+		{
+			sum = pGmmModel->pSegConst[mix];
+			for (dim = 0; dim < HCR_GMM_DIM; dim++)
+			{
+				xmm = normFea[dim] - pCurGmmMean[dim];
+				sum += xmm * xmm * (pCurGmmVar[dim]);
+			}
+			px = pGmmModel->pSegWeight[mix] - sum;
+
+			// 可优化:在每维计算之后判断
+			if (px > bx)
+			{
+				bx = px;
+			}
+
+			pCurGmmMean += HCR_GMM_DIM;
+			pCurGmmVar += HCR_GMM_DIM;
+		}
+		//scoreOfSeg = (long)(bx * HCR_GMM_F2I_MULTIPLY);
+		scoreOfSeg = bx;
+
+		bx = HCR_FMIN;
+		pCurGmmMean = pGmmModel->pConjMean;
+		pCurGmmVar = pGmmModel->pConjVar;
+		for (mix = 0; mix < HCR_GMM_MIX; mix++)
+		{
+			sum = pGmmModel->pConjConst[mix];
+			for (dim = 0; dim < HCR_GMM_DIM; dim++)
+			{
+				xmm = normFea[dim] - pCurGmmMean[dim];
+				sum += xmm * xmm * (pCurGmmVar[dim]);
+			}
+			px = pGmmModel->pConjWeight[mix] - sum;
+
+			if (px > bx)
+			{
+				bx = px;
+			}
+
+			pCurGmmMean += HCR_GMM_DIM;
+			pCurGmmVar += HCR_GMM_DIM;
+		}
+		//scoreOfConj = (long)(bx * HCR_GMM_F2I_MULTIPLY);
+		scoreOfConj = bx;
+
+		fCombineScore[i] = scoreOfConj - scoreOfSeg;
+	}
+}
+
+static void SplitStrategyRescore(PSPLITPATHHCR psp, PSTROKEINFOHCR psi, const short nCandPathNum)
+{
+	short i, j, nMaxScorePath;
+	float pfPathScore[FINAL_SP_CAND_NUM];	// 存放新分数的数组，每个元素对应一个切分路径
+	float fMaxScore;
+	PSPLITPATHHCR pspTemp;
+	float SCORE_DIFF_TH;
+	SPLITPATHHCR spTmp;
+	int index = 5;
+
+	//assert(psp && psp->m_pCandidate);
+
+	// 基于识别距离打分
+	for (i = 0, pspTemp = psp; i < nCandPathNum; ++i, pspTemp++)
+	{
+		short nCharNum = pspTemp->nGroupNum;
+		pfPathScore[i] = 0.0;
+		for (j = 0; j < nCharNum; ++j)
+		{
+			short nStrokeNumOfGroup = pspTemp->group[j].nStrokeEn - pspTemp->group[j].nStrokeBe + 1;
+			short nStrokeID = pspTemp->group[j].nStrokeBe;
+			long d5, d0;
+			//assert(nStrokeNumOfGroup > 0 && nStrokeNumOfGroup <= 3);
+			if (nStrokeNumOfGroup == 1)
+			{
+				d0 = psi[nStrokeID].nDistance1[0];
+				d5 = psi[nStrokeID].nDistance1[index];
+			}
+			else if (nStrokeNumOfGroup == 2)
+			{
+				d0 = psi[nStrokeID].nDistance2[0];
+				d5 = psi[nStrokeID].nDistance2[index];
+			}
+			else
+			{
+				d0 = psi[nStrokeID].nDistance3[0];
+				d5 = psi[nStrokeID].nDistance3[index];
+			}
+			pfPathScore[i] += (float)d5 / (float)d0 * (float)nStrokeNumOfGroup;
+		}
+		//pfPathScore[i] /= pspTemp->m_u4StrokeCount;
+		pfPathScore[i] /= (pspTemp->nGroupNum + 1);
+	}
+	for (i = nCandPathNum; i < FINAL_SP_CAND_NUM; ++i)
+	{
+		pfPathScore[i] = 0.0;
+	}
+	SCORE_DIFF_TH = pfPathScore[0] * 0.2f;
+	// 重新判断首选
+	fMaxScore = -1e10;	// 很小的值
+	nMaxScorePath = -1;
+	for (i = 0; i < nCandPathNum; ++i)
+	{
+		if (pfPathScore[i] - fMaxScore > SCORE_DIFF_TH)
+		{
+			fMaxScore = pfPathScore[i];
+			nMaxScorePath = i;
+		}
+	}
+	//assert(nMaxScorePath >= 0);
+
+	if (nMaxScorePath == 0)		// 旧首选就是新首选
+	{
+		return;
+	}
+
+	spTmp = psp[nMaxScorePath];
+	for (i = nMaxScorePath; i > 0; i--)
+	{
+		psp[i] = psp[i-1];
+	}
+	psp[0] = spTmp;
+}
+
+// 正式的笔划分组及单个字符识别
+static short SplitRegionToGroup(unsigned short uPntData[],
+						 const unsigned short uPntNum,
+						 PSPLITPATHHCR psp, 
+						 PSTROKEINFOHCR psiStrokeInfo, 
+						 int nStrokeCount, 
+						 char *pGlobalRam)
+{
+	// Local definitions
+	float ppfCFDMatrix[HCR_MAX_STROKE * HC_MAX_STROKE_PER_GROUP];		// Confidence matrix
+	float *pCurConfMatrix;
+	int i, j, k, l, m;
+	typedef struct SplitPathAndCFD
+	{		
+		short nSplitFloag[HCR_MAX_STROKE];
+		float fTotalCFD;
+		float fAveCFD;
+		int nGroupNum;
+	} SplitPathAndCFD;
+
+	SplitPathAndCFD ppspcSplitPathAndCFD[HC_MAX_STROKE_PER_GROUP][MAX_SP_CAND_NUM] = {0};	 
+	SplitPathAndCFD *pspcTemp, spcTemp;
+	SPLITPATHHCR *pspWork;
+	short nInsFlag;
+	float pfCombineCFD[HCR_MAX_STROKE];
+
+	int nTemp, nInsertIndex;
+	int nSup;
+
+	short nStrokeID;
+
+	// Handling exceptions
+	//if (!psp || !psiStrokeInfo || nStrokeCount <= 0)
+	//	return;
+
+	pfCombineCFD[nStrokeCount - 1] = 0.0;
+	FeatureExtractionAndScore(uPntData, uPntNum, pfCombineCFD, nStrokeCount, pGlobalRam);
+
+	// 切分点打分的基于规则的修正
+	pCurConfMatrix = &ppfCFDMatrix[0];
+	for (i = 0; i < nStrokeCount; ++i)
+	{
+		for (j = 0; j < HC_MAX_STROKE_PER_GROUP; ++j)
+		{
+			pCurConfMatrix[j] = HCR_FMIN;
+		}
+		for (j = 0; j < min(HC_MAX_STROKE_PER_GROUP, nStrokeCount - i); ++j)
+		{
+			pCurConfMatrix[j] = 0.0;
+			for (k = i; k < i + j; ++k)
+			{
+				pCurConfMatrix[j] += pfCombineCFD[k];
+			}
+			pCurConfMatrix[j] -= pfCombineCFD[i + j];
+		}
+		pCurConfMatrix += HC_MAX_STROKE_PER_GROUP;
+	}
+	
+	for (int i = 0; i < HCR_MAX_STROKE * HC_MAX_STROKE_PER_GROUP; i++)
+	{
+		//if ( ppfCFDMatrix[i] > 0)
+			//printf("%d\n",ppfCFDMatrix[i] );
+	}
+	// 切分块打分的基于规则的修正
+	AmendSplitGroupScore(nStrokeCount, psiStrokeInfo, ppfCFDMatrix,uPntData);
+
+	for (i = 0; i < HC_MAX_STROKE_PER_GROUP; ++i)
+	{
+		for (j = 0; j < MAX_SP_CAND_NUM; ++j)
+		{
+			ppspcSplitPathAndCFD[i][j].nGroupNum = 0;	// invalid split path, otherwise > 0
+			ppspcSplitPathAndCFD[i][j].fAveCFD = ppspcSplitPathAndCFD[i][j].fTotalCFD = HCR_FMIN;
+    			for (k = 0; k < nStrokeCount; ++k)
+				ppspcSplitPathAndCFD[i][j].nSplitFloag[k] = 0;
+		}
+	}
+
+	// Collect split paths
+	for (i = 0; i < nStrokeCount; ++i)			// For every stroke
+	{
+		nTemp = MAX_SP_CAND_NUM;
+		for (j = 0; j < MAX_SP_CAND_NUM; ++j)
+		{
+			if (ppspcSplitPathAndCFD[HC_MAX_STROKE_PER_GROUP - 1][j].nGroupNum <= 0)
+			{
+				nTemp = j;
+				break;
+			}
+			// Add the split points
+			pspcTemp = &(ppspcSplitPathAndCFD[HC_MAX_STROKE_PER_GROUP - 1][j]);
+			pspcTemp->nSplitFloag[i] = 1;
+			for (k = 1; k < HC_MAX_STROKE_PER_GROUP; ++k)
+				pspcTemp->nSplitFloag[i-k] = 0;
+
+			// Update confidence: total and average
+			pspcTemp->fTotalCFD 
+				+= ppfCFDMatrix[(i - HC_MAX_STROKE_PER_GROUP + 1) * HC_MAX_STROKE_PER_GROUP + HC_MAX_STROKE_PER_GROUP - 1];
+			++(pspcTemp->nGroupNum);
+			pspcTemp->fAveCFD = pspcTemp->fTotalCFD / pspcTemp->nGroupNum;
+		}
+
+		if (i < HC_MAX_STROKE_PER_GROUP)	// A group of length i should be added
+		{
+			spcTemp.fAveCFD = spcTemp.fTotalCFD = ppfCFDMatrix[i];
+			spcTemp.nGroupNum = 1;
+			for (j = 0; j < nStrokeCount; ++j)
+			{
+				spcTemp.nSplitFloag[j] = ((j == i)? 1 : 0);
+			}
+
+			nTemp = 0;	
+			pspcTemp = ppspcSplitPathAndCFD[HC_MAX_STROKE_PER_GROUP - 1];
+			for (l = 0; l < MAX_SP_CAND_NUM; ++l)
+			{
+				if (pspcTemp[l].nGroupNum <= 0) break;
+				if (l < MAX_SP_CAND_NUM) ++nTemp;
+			}
+			nInsFlag = 0;		// whether spcTemp has been inserted
+			for (l = 0; l < min(nTemp+1, MAX_SP_CAND_NUM); ++l)
+			{
+				if (pspcTemp[l].fTotalCFD < spcTemp.fTotalCFD)
+				{
+					nInsFlag = 1;
+					for (m = nTemp; m >= l; --m)
+					{
+						if (m < MAX_SP_CAND_NUM - 1)
+							FPExchange(SplitPathAndCFD, pspcTemp[m], pspcTemp[m + 1]);
+					}
+
+					pspcTemp[l].nGroupNum = spcTemp.nGroupNum;
+					pspcTemp[l].fAveCFD = spcTemp.fAveCFD;
+					pspcTemp[l].fTotalCFD = spcTemp.fTotalCFD;
+					for (nStrokeID = 0; nStrokeID < nStrokeCount; nStrokeID++)
+					{
+						pspcTemp[l].nSplitFloag[nStrokeID] = spcTemp.nSplitFloag[nStrokeID];
+					}
+					break;
+				}
+			}
+			if (!nInsFlag && nTemp < MAX_SP_CAND_NUM)
+			{
+				pspcTemp[nTemp].nGroupNum = spcTemp.nGroupNum;
+				pspcTemp[nTemp].fAveCFD = spcTemp.fAveCFD;
+				pspcTemp[nTemp].fTotalCFD = spcTemp.fTotalCFD;
+				for (nStrokeID = 0; nStrokeID < nStrokeCount; nStrokeID++)
+				{
+					pspcTemp[nTemp].nSplitFloag[nStrokeID] = spcTemp.nSplitFloag[nStrokeID];
+				}
+			}
+		}
+
+		// Insertion of the other (HC_MAX_STROKE_PER_GROUP - 1) ppspcSplitPathAndCFD's
+		for (j = 0; j < HC_MAX_STROKE_PER_GROUP - 1; ++j)
+		{
+			nInsertIndex = 0;
+			for (k = 0; k < MAX_SP_CAND_NUM; ++k)
+			{
+				if (ppspcSplitPathAndCFD[j][k].nGroupNum <= 0) break;
+
+				nTemp = 0;
+				pspcTemp = ppspcSplitPathAndCFD[HC_MAX_STROKE_PER_GROUP - 1];
+				nInsFlag = 0;
+				for (l = 0; l < MAX_SP_CAND_NUM; ++l)
+				{
+					if (pspcTemp[l].nGroupNum <= 0) break;
+					++nTemp;
+				}
+				nInsFlag = 0;
+				for (l = nInsertIndex; l < min(nTemp, MAX_SP_CAND_NUM); ++l)
+				{
+					if (	ppspcSplitPathAndCFD[j][k].nGroupNum > 0
+						&&	pspcTemp[l].fTotalCFD < 
+						ppspcSplitPathAndCFD[j][k].fTotalCFD
+						+ ppfCFDMatrix[(i - j) * HC_MAX_STROKE_PER_GROUP + j]
+					)	// insertion condition
+					{
+						for (m = nTemp; m >= l; --m)
+						{
+							if (m < MAX_SP_CAND_NUM - 1)
+								FPExchange(SplitPathAndCFD, pspcTemp[m], pspcTemp[m + 1]);
+						}
+						pspcTemp[l].nGroupNum = ppspcSplitPathAndCFD[j][k].nGroupNum;
+						pspcTemp[l].fAveCFD = ppspcSplitPathAndCFD[j][k].fAveCFD;
+						pspcTemp[l].fTotalCFD = ppspcSplitPathAndCFD[j][k].fTotalCFD;
+						for (nStrokeID = 0; nStrokeID < nStrokeCount; nStrokeID++)
+						{
+							pspcTemp[l].nSplitFloag[nStrokeID] = 
+								ppspcSplitPathAndCFD[j][k].nSplitFloag[nStrokeID];
+						}
+						for (m = i - j; m < i; ++m)
+							pspcTemp[l].nSplitFloag[m] = 0;
+						pspcTemp[l].nSplitFloag[i] = 1;
+						pspcTemp[l].fTotalCFD += ppfCFDMatrix[(i - j) * HC_MAX_STROKE_PER_GROUP + j];
+						++(pspcTemp[l].nGroupNum);
+						pspcTemp[l].fAveCFD = pspcTemp[l].fTotalCFD / pspcTemp[l].nGroupNum;
+						nInsFlag = 1;
+						break;
+					}
+				}
+
+				if (!nInsFlag && nTemp < MAX_SP_CAND_NUM)
+				{
+					l = nTemp;
+					pspcTemp[l].nGroupNum = ppspcSplitPathAndCFD[j][k].nGroupNum;
+					pspcTemp[l].fAveCFD = ppspcSplitPathAndCFD[j][k].fAveCFD;
+					pspcTemp[l].fTotalCFD = ppspcSplitPathAndCFD[j][k].fTotalCFD;
+					for (nStrokeID = 0; nStrokeID < nStrokeCount; nStrokeID++)
+					{
+						pspcTemp[l].nSplitFloag[nStrokeID] = 
+							ppspcSplitPathAndCFD[j][k].nSplitFloag[nStrokeID];
+					}
+					for (m = i - j; m < i; ++m)
+						pspcTemp[l].nSplitFloag[m] = 0;
+					pspcTemp[l].nSplitFloag[i] = 1;
+					pspcTemp[l].fTotalCFD += ppfCFDMatrix[(i - j) * HC_MAX_STROKE_PER_GROUP + j];
+					++(pspcTemp[l].nGroupNum);
+					pspcTemp[l].fAveCFD = pspcTemp[l].fTotalCFD / pspcTemp[l].nGroupNum;
+				}
+
+				nInsertIndex = max(0, l-1);
+			}
+		}
+		// Pointer exchanges
+		for (j = HC_MAX_STROKE_PER_GROUP - 1; j > 0; --j)
+		{
+			for (k = 0; k < MAX_SP_CAND_NUM; k++)
+			{
+				FPExchange(SplitPathAndCFD,  ppspcSplitPathAndCFD[j][k], ppspcSplitPathAndCFD[j-1][k]);
+			}
+		}
+	}
+
+	// First FINAL_SP_CAND_NUM split paths collection
+	pspWork = psp;
+	nSup = min(FINAL_SP_CAND_NUM, MAX_SP_CAND_NUM);
+	for (j = 0; j < nSup; ++j)
+	{
+		if (ppspcSplitPathAndCFD[0][j].nGroupNum <= 0)
+		{
+			break;
+		}
+		{
+			short nStrokeBe = 0;
+			short nGroupNum = 0;
+			short nStrokeNumOfGroup;
+			short nCandID, nCandNum;
+			long nSumX, nSumY, nPntNum;
+
+			for (i = 0; i < nStrokeCount; i++)
+			{
+				if (ppspcSplitPathAndCFD[0][j].nSplitFloag[i] == 1)
+				{
+					// this group ends with stroke i
+					psp[j].group[nGroupNum].nStrokeBe = nStrokeBe;
+					psp[j].group[nGroupNum].nStrokeEn = (short)i;
+					nStrokeNumOfGroup = (short)i - nStrokeBe + 1;
+					//assert(nStrokeNumOfGroup > 0 && nStrokeNumOfGroup <= 3);
+					if (nStrokeNumOfGroup == 1)
+					{
+						nCandNum = psiStrokeInfo[nStrokeBe].nCandCount1;
+						psp[j].group[nGroupNum].nCandCount = nCandNum;
+						for (nCandID = 0; nCandID < nCandNum; nCandID++)
+						{
+							psp[j].group[nGroupNum].uText[nCandID] = psiStrokeInfo[nStrokeBe].uText1[nCandID];
+							psp[j].group[nGroupNum].nDistance[nCandID] = psiStrokeInfo[nStrokeBe].nDistance1[nCandID];
+						}
+					}
+					else if (nStrokeNumOfGroup == 2)
+					{
+						nCandNum = psiStrokeInfo[nStrokeBe].nCandCount2;
+						psp[j].group[nGroupNum].nCandCount = nCandNum;
+						for (nCandID = 0; nCandID < nCandNum; nCandID++)
+						{
+							psp[j].group[nGroupNum].uText[nCandID] = psiStrokeInfo[nStrokeBe].uText2[nCandID];
+							psp[j].group[nGroupNum].nDistance[nCandID] = psiStrokeInfo[nStrokeBe].nDistance2[nCandID];
+						}
+					}
+					else
+					{
+						nCandNum = psiStrokeInfo[nStrokeBe].nCandCount3;
+						psp[j].group[nGroupNum].nCandCount = nCandNum;
+						for (nCandID = 0; nCandID < nCandNum; nCandID++)
+						{
+							psp[j].group[nGroupNum].uText[nCandID] = psiStrokeInfo[nStrokeBe].uText3[nCandID];
+							psp[j].group[nGroupNum].nDistance[nCandID] = psiStrokeInfo[nStrokeBe].nDistance3[nCandID];
+						}
+					}
+					nSumX = nSumY = nPntNum = 0;
+					for (nStrokeID = nStrokeBe; nStrokeID <= i; nStrokeID++)
+					{
+						nSumX += psiStrokeInfo[nStrokeID].nGravX * (long)psiStrokeInfo[nStrokeID].uPntNum;
+						nSumY += psiStrokeInfo[nStrokeID].nGravY * (long)psiStrokeInfo[nStrokeID].uPntNum;
+						nPntNum += (long)psiStrokeInfo[nStrokeID].uPntNum;
+					}
+					psp[j].group[nGroupNum].nGravX = (short)(nSumX / nPntNum);
+					psp[j].group[nGroupNum].nGravY = (short)(nSumY / nPntNum);
+					nGroupNum++;
+					nStrokeBe = (short)(i + 1);
+				}
+			}
+
+			psp[j].fScore = ppspcSplitPathAndCFD[0][j].fTotalCFD;
+			psp[j].nGroupNum = nGroupNum;
+		}
+	}
+
+	return (short)j;
+}
