@@ -1,0 +1,1008 @@
+/******************************************************************
+* Function:
+* Description: 计算相邻笔画或笔画自身是否有交点
+* Call:         
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+*	candidate word number
+******************************************************************/
+static unsigned short CalCrossPoint(
+									unsigned short *pRawPntData,
+									PSTROKEINFOHCR pStrokeInfo,
+									unsigned short FirstStroke,
+									unsigned short SecondStroke
+									)
+{
+	int i,j;
+	unsigned short MinDist = 0,CurrentMinDist = 1000;
+
+	for (i = pStrokeInfo[FirstStroke].uStartPt; 
+		i<pStrokeInfo[FirstStroke].uStartPt 
+		+ pStrokeInfo[FirstStroke].uPntNum; i++)
+	{
+		for (j = pStrokeInfo[SecondStroke].uStartPt; 
+			j<pStrokeInfo[SecondStroke].uStartPt 
+			+ pStrokeInfo[SecondStroke].uPntNum; j++)
+		{
+			if (abs(pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+				<= HCR_POST_Y_INTERSEC_THRESH)
+			{
+				//calculate the minimum distance between two strokes
+				MinDist = (pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+					* (pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+					+ (pRawPntData[2*i] - pRawPntData[2*j]) 
+					* (pRawPntData[2*i] - pRawPntData[2*j]);
+
+				if (MinDist < CurrentMinDist)
+				{
+					CurrentMinDist = MinDist;
+
+					if (CurrentMinDist <= HCR_INTERSEC_DIST_THRESH)
+					{
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+
+}
+
+/******************************************************************
+* Function:
+* Description: 计算某一笔画是否有相近的交点
+* Call:         
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+*	candidate word number
+******************************************************************/
+static unsigned short NearCrossPoint(
+									 unsigned short *pRawPntData,
+									 PSTROKEINFOHCR pStrokeInfo,
+									 unsigned short StrokeIdx
+									 )
+{
+	int i,j;
+	unsigned short CrossPntNum = 0,MinDist = 0,CurrentMinDist = 1000;
+
+	for (i = pStrokeInfo[StrokeIdx].uStartPt; 
+		i<pStrokeInfo[StrokeIdx].uStartPt 
+		+ pStrokeInfo[StrokeIdx].uPntNum; i++)
+	{
+		for (j = pStrokeInfo[StrokeIdx].uStartPt; 
+			j<pStrokeInfo[StrokeIdx].uStartPt 
+			+ pStrokeInfo[StrokeIdx].uPntNum; j++)
+		{
+			//when calculate the intersection within one stroke, make sure the two points are far enough
+			if ((abs(pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+				<= HCR_POST_Y_INTERSEC_THRESH) 
+				&& (abs(i-j) > max(0.2*pStrokeInfo[StrokeIdx].uPntNum,5)))
+			{
+				MinDist = (pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+					* (pRawPntData[2*i+1] - pRawPntData[2*j+1]) 
+					+ (pRawPntData[2*i] - pRawPntData[2*j]) 
+					* (pRawPntData[2*i] - pRawPntData[2*j]);
+
+				if (MinDist < CurrentMinDist)
+				{
+					CurrentMinDist = MinDist;
+
+					if (CurrentMinDist <= HCR_INTERSEC_DIST_THRESH)
+					{
+						CrossPntNum++;
+					}
+				}
+			}
+		}
+	}
+
+	return CrossPntNum;
+
+}
+/************************************************************************************************
+*	Prototype:	void hcrMakeArrange(int nReorderNumber, WORD * res,WORD * priSym,int isNot) *
+*	Purpose:	对候选字进行重新排序															*
+*	Parameters:	->nReorderNumber	参与重排序的个数											*
+*				<->res				处理前后的候选字(Unicode码)							　		*
+*				->priSym			被处理的字符集(Unicode码)							　		*
+*				->isNot			    标志：如为FALSE,则把priSym所含的字符排在前面，否则把其排后面	*
+*	Return:		有效的候选个数																			*
+*	Comments:   本函数把既包含于res中又包含于priSym中的字符排在候选的前面或后面
+*  Call by: many functions
+*************************************************************************************************/
+
+
+static short hcrMakeArrange(int nReorderNumber, unsigned short * resCand, unsigned short * priSym, int isNot)
+{
+	unsigned short * pResChar = resCand;
+	unsigned short * pPriSym = 0;
+	short count = 0, nValidNum = 0;
+	unsigned short inFilter[FP_CHNCAND_NUM+1] = {0,};
+	unsigned short outFilter[FP_CHNCAND_NUM+1] = {0,};
+	unsigned short * pInFilter = inFilter;
+	unsigned short * pOutFilter = outFilter;
+
+	if(isNot)
+	{
+		pInFilter = outFilter;
+		pOutFilter = inFilter;
+	}
+
+	for(count = 0 ; (count < nReorderNumber) && (*pResChar); count++ , pResChar++)
+	{
+		for(pPriSym = priSym ;*pPriSym;pPriSym++)//在priSym中查找当前字符
+		{
+			if(*pPriSym == *pResChar)
+			{
+				break;
+			}
+		}
+
+		if(*pPriSym) 
+		{
+			//找到指定类字符
+			*pInFilter++ = *pResChar;
+		}
+		else 
+		{
+			//没找到指定类字符，即为一般字符
+			*pOutFilter++ = *pResChar;
+		}
+	}
+
+	//以下为整理，即把指定类的字符放于候选的前面
+	pInFilter = inFilter;
+	pOutFilter = outFilter;
+	while(*pInFilter)
+	{
+		*resCand = *pInFilter; 
+		pInFilter++;
+		resCand++;
+		if(isNot) 
+		{
+			nValidNum++;
+		}
+	}
+
+	while(*pOutFilter)
+	{
+		*resCand = *pOutFilter; 
+		pOutFilter++;
+		resCand++;
+	}
+
+	if(!isNot) 
+	{
+		nValidNum = nReorderNumber;
+	}
+	return nValidNum;
+}
+/******************************************************************
+* Function:
+* Description: post process based on stroke numbers
+* Call:         
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+*	candidate word number
+******************************************************************/
+static short StrokeNumBaseProc(unsigned short nReorderNum,//实际候选个数 < FP_CHNCAND_NUM
+							  unsigned short uCandResult[],//候选字符
+							  PSTROKEINFOHCR pStrokeInfo,
+							  unsigned short uStrokeId[],
+							  unsigned short uStrokeNum
+							  )
+{
+	short nSortNum = 0;
+	//A类 肯定不是1笔的 + x 除号 = 
+	unsigned short pStroNotOne[]= {0x002b,0x00d7,0x00f7,0x003d,0};
+	//B类，肯定是一笔的 ( ) - / 0 1 2 3 6 8 . 9
+	unsigned short pStroSureOne[] = {0x0028,0x0029,0x002d,0x002f,0x0030,0x0031,0x0032,0x0033,0x0036,0x0038,0x002e,0x0039,0};
+	//C类，肯定是2笔的 + x =  
+	unsigned short pStroSureTwo[] = {0x002b,0x00d7,0x003d,0};
+	//D类，肯定是>=3笔的 除号
+	unsigned short pStroLgerThree[] = {0x00f7,0};
+	//E类，标点符号 - .
+	unsigned short pStroComSym[] = {0x002d,0x002e,0};
+
+
+	switch(uStrokeNum) 
+	{
+	case 1:
+		//如果字符很矮
+		//No.3	如果只有一笔且高度特矮，将标点符号提前
+		if ((uStrokeNum == 1)
+			&& ((pStrokeInfo[uStrokeId[0]].rect.nBottom - pStrokeInfo[uStrokeId[0]].rect.nTop) < 5)
+			&& (pStrokeInfo[uStrokeId[0]].uPntNum < 10))//临时
+		{
+			//move forward
+			nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroComSym,0);
+		}
+		else
+		{
+			//将肯定不是1笔的放在后面
+			//move backward
+			nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroNotOne,1);
+
+			//将肯定是2笔的放在后面
+			//move backward
+			nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroSureTwo,1);
+
+			//将肯定是3/4笔的放在后面
+			//move backward
+			nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroLgerThree,1);
+		}
+
+		break;
+
+	case 2:
+		//将一定1笔的放在后面
+		//move backward
+		nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroSureOne,1);
+
+		//将肯定是3/4笔的放在后面
+		//move backward
+		nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroLgerThree,1);
+		break;
+
+	default:
+
+		//将一定1笔和一定2笔的放在后面
+		//move backward
+		nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroSureOne,1);
+
+		//move backward
+		nSortNum=hcrMakeArrange(nReorderNum,uCandResult,pStroSureTwo,1);
+		break;
+	}
+	return nSortNum;
+}
+/******************************************************************
+* Function:
+* Description: 计算一笔之内x方向拐点个数
+* Call:         
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+*	candidate word number
+******************************************************************/
+static unsigned short InflectionPointCal(
+	unsigned short *pPntData,
+	unsigned short nPntNum,
+	unsigned short uStrokeNum)
+{
+	int i, InfPntIdx = 0;
+	unsigned short InfPntNum = 0;
+
+	if ((uStrokeNum == 1) && (nPntNum > 15))
+	{
+		//避开开始的5个点的波动影响
+		for (i = 2;i<nPntNum-10;i++)
+		{
+			if (((pPntData[2*i] > pPntData[2*(i+5)])
+				&& (pPntData[2*(i+5)] < pPntData[2*(i+10)]))
+				|| ((pPntData[2*i] < pPntData[2*(i+5)])
+				&& (pPntData[2*(i+5)] > pPntData[2*(i+10)])))
+			{
+				if ((InfPntIdx == 0) || ((InfPntIdx > 0) 
+					&& (abs(InfPntIdx - i) > max(10,0.2*nPntNum))))
+				{
+					InfPntIdx = i;
+					InfPntNum++;
+				}
+			}
+		}
+
+		return InfPntNum;
+	}
+
+	return 0;
+
+}
+
+/******************************************************************
+* Function:
+* Description: 数字后处理
+* Call:         
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+*	candidate word number
+******************************************************************/
+static short NumPost(
+					//unsigned short nMaxStrokeLen,
+					unsigned short *pRawPntData,
+					PSTROKEINFOHCR pStrokeInfo,
+					unsigned short uStrokeId[],
+					unsigned short uStrokeNum,
+					short nCandCount,//实际候选个数 < FP_CHNCAND_NUM
+					unsigned short uCandResult[]//候选字符
+					)
+{
+	int i,CandIdx;
+	unsigned short StrIdx0 = 0,StrIdx1=0, Hgt0 = 0,Hgt1 = 0,Wid0 = 0,Wid1 = 0;
+	STROKEINFOHCR RawStroke0,RawStroke1;
+	unsigned short RemoveCand[FP_CHNCAND_NUM] = {0,};
+	unsigned short RemoveArrayIdx = 0,NewCandIdx = 0,CandRlt = 0;
+	
+	StrIdx0 = uStrokeId[0];
+	RawStroke0 = pStrokeInfo[StrIdx0];
+	
+	Hgt0 = RawStroke0.rect.nBottom - RawStroke0.rect.nTop;
+	Wid0 = RawStroke0.rect.nRight - RawStroke0.rect.nLeft;
+
+	if (uStrokeNum > 1)
+	{	
+		StrIdx1 = uStrokeId[1];
+		RawStroke1 = pStrokeInfo[StrIdx1];
+		
+		Hgt1 = RawStroke1.rect.nBottom - RawStroke1.rect.nTop;
+		Wid1 = RawStroke1.rect.nRight - RawStroke1.rect.nLeft;
+	}
+	nCandCount = StrokeNumBaseProc(nCandCount,uCandResult,pStrokeInfo,uStrokeId,uStrokeNum);
+	if (nCandCount == 0)
+		return 0;
+
+	for (CandIdx = 0;CandIdx < nCandCount;CandIdx++)
+	{
+		CandRlt = uCandResult[CandIdx];
+
+// 		//0->o/O
+// 		if (CandRlt == 0x0030)
+// 		{
+// 			if ((pCharStruct->uStrokeNum > 2)
+// 				|| ((pCharStruct->uStrokeNum == 1)
+// 				&& (5*Hgt0 < 8*Wid0)))
+// 			{
+// 				RemoveCand[RemoveArrayIdx++] = CandRlt;
+// 				continue;
+// 			}
+// 		}
+
+		//1笔8
+		if ((CandRlt == 0x0038) 
+			&& (uStrokeNum == 1)
+			&& (abs(RawStroke0.nEndY - RawStroke0.nStartY) 	> 0.5*Hgt0))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//1笔3
+		if ((CandRlt == 0x0033) 
+			&& (uStrokeNum == 1)
+			&& (RawStroke0.rect.nBottom - RawStroke0.nStartY < 0.3*Hgt0))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+
+		//1笔0, 6被识别成0
+		if ((CandRlt == 0x0030) 
+			&& (uStrokeNum == 1)
+			&& (abs(RawStroke0.nEndY - RawStroke0.nStartY) > 0.3*Hgt0))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//1笔6
+		if ((CandRlt == 0x0036) 
+			&& (uStrokeNum == 1)
+			&& ((RawStroke0.nEndY <= RawStroke0.nStartY)
+			|| ((RawStroke0.nEndY > RawStroke0.nStartY) 
+			&& (RawStroke0.nEndY - RawStroke0.nStartY < 0.2*Hgt0)))
+			)
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+		if ((CandIdx+1 < nCandCount)
+			&& (uStrokeNum == 1)
+			&& ((CandRlt == 0x0036) && (uCandResult[CandIdx+1] == 0x0028))
+			&& (InflectionPointCal(&(pRawPntData[2*RawStroke0.uStartPt]),RawStroke0.uPntNum,1) < 2)
+			)
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//1笔1/4/7/9
+		if (((CandRlt == 0x0031) || (CandRlt == 0x0034)
+			|| (CandRlt == 0x0037) || (CandRlt == 0x0039)) 
+			&& (uStrokeNum== 1)
+			&& (abs(RawStroke0.nEndY - RawStroke0.rect.nTop) < 0.75*Hgt0))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//1笔写成点儿字符，识别成非点儿字符(0-9不包含1),(等),但又点数太少
+		if (((CandRlt == 0x0030) || ((CandRlt >= 0x0032) 
+			&& (CandRlt <= 0x0039)))
+			&& (uStrokeNum== 1)
+			&& ((RawStroke0.uPntNum <= HCR_DOT_LIM_FOR_NUM) 
+			/*|| (nMaxStrokeLen <= HCR_MIN_NUMSTRK_LEN) */
+			))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+		
+		
+		////2笔且必有交叉的+号
+		//if ((CandRlt == 0x002b)
+		//	&& (uStrokeNum== 2)
+		//	&& (CalCrossPoint(pRawPntData,pStrokeInfo,StrIdx0,StrIdx1) == 0)
+		//	)
+		//{
+		//	RemoveCand[RemoveArrayIdx++] = CandRlt;
+		//	continue;
+		//}
+		//2笔4被识为+号
+		if ((CandRlt == 0x002b)
+			&& (uStrokeNum== 2)
+			&& (((pStrokeInfo[StrIdx0].rect.nBottom > pStrokeInfo[StrIdx1].rect.nBottom)&&(Hgt1*2>Wid1))
+			||((pStrokeInfo[StrIdx1].rect.nBottom > pStrokeInfo[StrIdx0].rect.nBottom)&&(Hgt0*2>Wid0)
+			)))			
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+ 		//1/2笔且必有交叉的数字'4'
+		if ((CandRlt == 0x0034)
+			&& (((uStrokeNum== 2)
+			&& (CalCrossPoint(pRawPntData,pStrokeInfo,StrIdx0,StrIdx1) == 0)) 
+			|| ((uStrokeNum == 1) 
+			&& (NearCrossPoint(pRawPntData,pStrokeInfo,StrIdx0) == 0))))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//8被识别成5, 5的绝大多数都是2笔(也可以往细做，分成1/2笔展开)
+		if ((CandRlt == 0x0035) 
+			&& (uStrokeNum == 1)
+			&& ((abs(RawStroke0.nEndX - RawStroke0.nStartX) > 0.5*Wid0)
+			|| (abs(RawStroke0.nEndY - RawStroke0.nStartY) < 0.3*Hgt0))
+			)
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//1笔的'1'
+		if ((CandRlt == 0x0031) 
+			&& (uStrokeNum == 1)
+			&& ((RawStroke0.nEndY <= RawStroke0.nStartY) 
+			|| (RawStroke0.nEndY - RawStroke0.rect.nTop < 0.5*Hgt0)
+			|| (RawStroke0.nStartY - RawStroke0.rect.nTop > 0.5*Hgt0)
+			//6 is recognized as 1
+			|| ((RawStroke0.nStartY - RawStroke0.rect.nTop <= 0.1*Hgt0) 
+			&& (RawStroke0.rect.nBottom - RawStroke0.nEndY > 0.3*Hgt0))
+			))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//0被识别成左右大中小括号
+		if (((CandRlt == 0x0028) || (CandRlt == 0x0029))
+			&& (uStrokeNum == 1)
+			&& (4*abs(RawStroke0.nStartY - RawStroke0.nEndY) < Hgt0))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+		//1笔的-被识别为.
+		if ((CandRlt == 0x002e) 
+			&& (uStrokeNum == 1)
+			&& (3*(RawStroke0.rect.nBottom - RawStroke0.rect.nTop) <
+			(RawStroke0.rect.nRight - RawStroke0.rect.nLeft))
+			&& ((RawStroke0.rect.nRight - RawStroke0.rect.nLeft) > 5))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+		//1笔的.被识别为-
+		if ((CandRlt == 0x002d) 
+			&& (uStrokeNum == 1)
+			&& (Hgt0 < 5) 
+			&& (Wid0 < 5)
+			&& (2*(RawStroke0.rect.nBottom - RawStroke0.rect.nTop) >
+			(RawStroke0.rect.nRight - RawStroke0.rect.nLeft)))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+		//1笔的-被识别为/
+		if ((CandRlt == 0x002f) 
+			&& (uStrokeNum == 1)
+			&& (3*(RawStroke0.rect.nBottom - RawStroke0.rect.nTop) <
+			(RawStroke0.rect.nRight - RawStroke0.rect.nLeft))
+			&& ((RawStroke0.rect.nRight - RawStroke0.rect.nLeft) > 10))
+		{
+			RemoveCand[RemoveArrayIdx++] = CandRlt;
+			continue;
+		}
+
+		//如果上述条件均不满足，当前字符不调整，copy至pCharStruct候选数组
+		uCandResult[NewCandIdx] = CandRlt;
+		NewCandIdx++;
+	}
+
+	//将Remain结果copy到pCharStruct的最后
+	for (i = 0;i<RemoveArrayIdx;i++)
+	{
+		uCandResult[NewCandIdx+i] = RemoveCand[i];
+	}
+	return NewCandIdx;
+}
+
+short hmcSegAndRecog(unsigned short uPntData[],
+					const unsigned short uPntNum,
+					char *pGlobalRam, 
+					PSPLITPATHHCR pSplitPath,
+					PSTROKEINFOHCR pStrokeInfo,
+					short *pStrokeNum)
+{
+	short i, j, nStrokeNum;
+	short nStrokeID;
+	short nPntID, nPntDataID;
+
+	short nPathNum = 0;
+
+	unsigned char *pU8PntData = (unsigned char *)(pGlobalRam + HCR_RAM_OFFSET_FOR_U8_PNT);
+	char *pRecogRam = pGlobalRam + HCR_RAM_OFFSET_FOR_OLCCR_RAM;
+
+	short nGroupPntNum, nGroupPntDataNum;
+	short nLeft, nTop, nRight, nBottom, nWidth, nHeight, nZoomSize;
+	int nWidthP, nHeightP, nWidthN, nHeightN;
+
+	TEXTCODE ptcTmpCHN[FP_CHNCAND_NUM];
+	UINT16 pu2TmpDist[FP_CHNCAND_NUM];
+
+	unsigned short uStrokeId[4];//for recgnition post
+	unsigned short uTmpDist = 0;
+	short nCandCount = 0;
+
+	int nModified;
+	short nCandPathNum = 0;
+
+	nStrokeNum = GetStrokeInfo(uPntData, uPntNum, pStrokeInfo);
+
+	for (i = 0; i < FINAL_SP_CAND_NUM; i++)
+	{
+		pSplitPath[i].fScore = 0;
+		pSplitPath[i].nGroupNum = nStrokeNum;
+		for (j = 0; j < nStrokeNum; j++)
+		{
+			pSplitPath[i].group[j].nCandCount = 0;
+			pSplitPath[i].group[j].nStrokeBe = j;
+			pSplitPath[i].group[j].nStrokeEn = j;
+			pSplitPath[i].group[j].nGravX = pStrokeInfo[j].nGravX;
+			pSplitPath[i].group[j].nGravY = pStrokeInfo[j].nGravY;
+		}
+	}
+
+	for (nStrokeID = 0; nStrokeID < nStrokeNum; nStrokeID++)
+	{
+		// Get recognition candidates and corresponding distances
+
+
+		//========================================
+		// 1笔组成的group
+		nLeft = pStrokeInfo[nStrokeID].rect.nLeft;
+		nRight = pStrokeInfo[nStrokeID].rect.nRight;
+		nTop = pStrokeInfo[nStrokeID].rect.nTop;
+		nBottom = pStrokeInfo[nStrokeID].rect.nBottom;
+		nWidth = nRight - nLeft + 1;
+		nHeight = nBottom - nTop + 1;
+		nZoomSize = max(nWidth, nHeight);
+		
+		nGroupPntDataNum = 0;
+		nPntDataID = (short)pStrokeInfo[nStrokeID].uStartPt * 2;
+		if (nZoomSize < 255)
+		{
+			for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft);
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop);
+				nPntDataID++;
+			}
+		}
+		else
+		{
+			for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+			}
+		}
+
+		pU8PntData[nGroupPntDataNum++] = 0xff;
+		pU8PntData[nGroupPntDataNum++] = 0;
+		pU8PntData[nGroupPntDataNum++] = 0xff;
+		pU8PntData[nGroupPntDataNum++] = 0xff;
+		nGroupPntNum = nGroupPntDataNum / 2;
+
+// 		for(i=0;i<FP_CHNCAND_NUM;i++)
+// 		{
+// 			ptcTmpCHN[i]=0;
+// 			pu2TmpDist[i]=0;
+// 		}
+
+		WTRecognizeEx(pU8PntData, nGroupPntNum, FP_CHNCAND_NUM, ptcTmpCHN, pu2TmpDist, pRecogRam);
+		
+		uTmpDist =  (unsigned short)(MULTI_DISTANCE*pu2TmpDist[0]);
+		for (i = 0; i < FP_CHNCAND_NUM; i ++)
+		{
+			if ((pu2TmpDist[i] > uTmpDist) 
+				|| (pu2TmpDist[i] == MAX_RECOG_DISTANCE))
+				break;
+		}
+		nCandCount = i;
+		uStrokeId[0] = nStrokeID;
+		//  NumPost(uPntData,pStrokeInfo,uStrokeId,1,nCandCount,ptcTmpCHN);             //huyang
+
+		// 复制结果
+		for (i = 0; i < FP_CHNCAND_NUM; i++)
+		{
+			if(ptcTmpCHN[i]==0) break;
+			if(ptcTmpCHN[i]==0xFFFF) break;
+			// 特殊字符，特殊处理
+			switch (ptcTmpCHN[i])
+			{
+			case 0xd7: // 乘号
+				ptcTmpCHN[i] = (TEXTCODE)('*'); break;
+			case 0xf7: // 除号
+				ptcTmpCHN[i] = (TEXTCODE)(0x2215); break;
+			case 0x2014: // 横线
+				ptcTmpCHN[i] = (TEXTCODE)(0xff0d); break;
+			default: break;
+			}
+			pStrokeInfo[nStrokeID].uText1[i] = ptcTmpCHN[i];
+			pStrokeInfo[nStrokeID].nDistance1[i] = pu2TmpDist[i];
+		}
+		pStrokeInfo[nStrokeID].nCandCount1 = i;
+
+		// 点处理
+		if (nWidth <= 4 && nHeight <= 4)
+		{
+			pStrokeInfo[nStrokeID].uText1[0] = (TEXTCODE)(0xff0e);
+		}
+		else if (nWidth <= 7 && nHeight <= 7)
+		{
+			for (i = 0; i < pStrokeInfo[nStrokeID].nCandCount1; ++i)
+			{
+				if ((pStrokeInfo[nStrokeID].uText1[i] == (TEXTCODE)(0xff0e) || 
+					pStrokeInfo[nStrokeID].uText1[i] == (TEXTCODE)(',')) &&
+					((float)pStrokeInfo[nStrokeID].nDistance1[i] <
+					(float)pStrokeInfo[nStrokeID].nDistance1[0] * 1.6f))
+				{
+					pStrokeInfo[nStrokeID].uText1[0] = (TEXTCODE)(0xff0e);
+					break;
+				}
+			}
+		}
+		/**/
+
+		nModified = 0;
+
+		// '1', '/' 误识为 '根号' 
+		if (pStrokeInfo[nStrokeID].uText1[0] == 0x221A)
+		{
+			// 外接框过宽或过瘦者可直接判定
+			if ((float)nWidth > 1.5 * (float)nHeight)
+			{
+				nModified = -1;
+			}
+			else
+			{
+				if ((float)nWidth < 0.3 * (float)nHeight)
+				{
+					pStrokeInfo[nStrokeID].uText1[0] = 0xff11; //(TEXTCODE)('1');
+					nModified = 1;
+				}
+				// 从上往下写的不需要考虑，一定是根号
+				else if (pStrokeInfo[nStrokeID].nEndY <= pStrokeInfo[nStrokeID].nStartY)
+				{
+					nModified = -1;
+				}
+			}
+
+		}
+
+		//========================================
+		// 2笔组成的group
+		if (nStrokeID + 1 >= nStrokeNum)
+		{
+			pStrokeInfo[nStrokeID].nCandCount2 = 0;
+		}
+		else
+		{
+			nLeft = min(nLeft, pStrokeInfo[nStrokeID+1].rect.nLeft);
+			nRight = max(nRight, pStrokeInfo[nStrokeID+1].rect.nRight);
+			nTop = min(nTop, pStrokeInfo[nStrokeID+1].rect.nTop);
+			nBottom = max(nBottom, pStrokeInfo[nStrokeID+1].rect.nBottom);
+			nWidth = nRight - nLeft + 1;
+			nHeight = nBottom - nTop + 1;
+			nZoomSize = max(nWidth, nHeight);
+
+			nGroupPntDataNum = 0;
+			nPntDataID = (short)pStrokeInfo[nStrokeID].uStartPt * 2;
+			if (nZoomSize < 255)
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+				{
+
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft) ;
+					nPntDataID++;
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop);
+					nPntDataID++;
+				}
+			}
+			else
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+				{
+			
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				}
+			}
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0;
+
+			nPntDataID = (short)pStrokeInfo[nStrokeID+1].uStartPt * 2;
+			if (nZoomSize < 255)
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID+1].uPntNum; nPntID++)
+				{
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft ) ;
+					nPntDataID++;
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop ) ;
+					nPntDataID++;
+				}
+			}
+			else
+			for (nPntID = 0; nPntID < pStrokeInfo[nStrokeID+1].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+			}
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0;
+
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			nGroupPntNum = nGroupPntDataNum / 2;
+
+// 			for(i=0;i<FP_CHNCAND_NUM;i++)
+// 			{
+// 				ptcTmpCHN[i]=0;
+// 				pu2TmpDist[i]=0;
+// 			}
+
+			WTRecognizeEx(pU8PntData, nGroupPntNum, FP_CHNCAND_NUM, ptcTmpCHN, pu2TmpDist, pRecogRam);
+			uTmpDist =  (unsigned short)(MULTI_DISTANCE*pu2TmpDist[0]);
+			for (i = 0; i < FP_CHNCAND_NUM; i ++)
+			{
+				if ((pu2TmpDist[i] > uTmpDist) 
+					|| (pu2TmpDist[i] == MAX_RECOG_DISTANCE))
+					break;
+			}
+			nCandCount = i;
+			uStrokeId[0] = nStrokeID;
+			uStrokeId[1] = (nStrokeID + 1);
+			//NumPost(uPntData,pStrokeInfo,uStrokeId,2,nCandCount,ptcTmpCHN);   //huyang
+
+			// 复制结果
+			for (i = 0; i < FP_CHNCAND_NUM; i++)
+			{
+				if(ptcTmpCHN[i]==0) break;
+				if(ptcTmpCHN[i]==0xFFFF) break;
+				// 特殊字符，特殊处理
+				switch (ptcTmpCHN[i])
+				{
+				case 0xd7: // 乘号
+					ptcTmpCHN[i] = (TEXTCODE)('*'); break;
+				case 0xf7: // 除号
+					ptcTmpCHN[i] = (TEXTCODE)(0x2215); break;
+				case 0x2014: // 横线
+					ptcTmpCHN[i] = (TEXTCODE)(0xff0d); break;
+				default: break;
+				}
+				pStrokeInfo[nStrokeID].uText2[i] = ptcTmpCHN[i];
+				pStrokeInfo[nStrokeID].nDistance2[i] = pu2TmpDist[i];
+			}
+			pStrokeInfo[nStrokeID].nCandCount2 = i;
+		}
+
+		//========================================
+		// 3笔组成的group
+		if (nStrokeID + 2 >= nStrokeNum)
+		{
+			pStrokeInfo[nStrokeID].nCandCount3 = 0;
+		}
+		else
+		{
+			nLeft = min(nLeft, pStrokeInfo[nStrokeID+2].rect.nLeft);
+			nRight = max(nRight, pStrokeInfo[nStrokeID+2].rect.nRight);
+			nTop = min(nTop, pStrokeInfo[nStrokeID+2].rect.nTop);
+			nBottom = max(nBottom, pStrokeInfo[nStrokeID+2].rect.nBottom);
+			nWidth = nRight - nLeft + 1;
+			nHeight = nBottom - nTop + 1;
+			nZoomSize = max(nWidth, nHeight);
+
+			nGroupPntDataNum = 0;
+			nPntDataID = (short)pStrokeInfo[nStrokeID].uStartPt * 2;
+			if (nZoomSize < 255)
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+				{
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft ) ;
+					nPntDataID++;
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop ) ;
+					nPntDataID++;
+				}
+			}
+			else
+			for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+			}
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0;
+
+			nPntDataID = (short)pStrokeInfo[nStrokeID+1].uStartPt * 2;
+			if (nZoomSize < 255)
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID+1].uPntNum; nPntID++)
+				{
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft ) ;
+					nPntDataID++;
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop ) ;
+					nPntDataID++;
+				}
+			}
+			else
+			for (nPntID = 0; nPntID < pStrokeInfo[nStrokeID+1].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+			}
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0;
+
+			nPntDataID = (short)pStrokeInfo[nStrokeID+2].uStartPt * 2;
+			if (nZoomSize < 255)
+			{
+				for (nPntID = 0; nPntID < (short)pStrokeInfo[nStrokeID+2].uPntNum; nPntID++)
+				{
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft ) ;
+					nPntDataID++;
+					pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop ) ;
+					nPntDataID++;
+				}
+			}
+			else
+			for (nPntID = 0; nPntID < pStrokeInfo[nStrokeID+2].uPntNum; nPntID++)
+			{
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nLeft + 1) * 254 / nZoomSize;
+				nPntDataID++;
+				pU8PntData[nGroupPntDataNum++] = (uPntData[nPntDataID] - nTop + 1) * 254 / nZoomSize;
+				nPntDataID++;
+			}
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0;
+
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			pU8PntData[nGroupPntDataNum++] = 0xff;
+			nGroupPntNum = nGroupPntDataNum / 2;
+
+// 			for(i=0;i<FP_CHNCAND_NUM;i++)
+// 			{
+// 				ptcTmpCHN[i]=0;
+// 				pu2TmpDist[i]=0;
+// 			}
+
+			WTRecognizeEx(pU8PntData, nGroupPntNum, FP_CHNCAND_NUM, ptcTmpCHN, pu2TmpDist, pRecogRam);
+
+			uTmpDist =  (unsigned short)(MULTI_DISTANCE*pu2TmpDist[0]);
+			for (i = 0; i < FP_CHNCAND_NUM; i ++)
+			{
+				if ((pu2TmpDist[i] > uTmpDist) 
+					|| (pu2TmpDist[i] == MAX_RECOG_DISTANCE))
+					break;
+			}
+			nCandCount = i;
+			uStrokeId[0] = nStrokeID;
+			uStrokeId[1] = (nStrokeID + 1);
+			uStrokeId[2] = (nStrokeID + 2);
+			// NumPost(uPntData,pStrokeInfo,uStrokeId,3,nCandCount,ptcTmpCHN);    //huyang
+
+
+
+			// 复制结果
+			for (i = 0; i < FP_CHNCAND_NUM; i++)
+			{
+				if(ptcTmpCHN[i]==0) break;
+				if(ptcTmpCHN[i]==0xFFFF) break;
+				// 特殊字符，特殊处理
+				switch (ptcTmpCHN[i])
+				{
+				case 0xd7: // 乘号
+					ptcTmpCHN[i] = (TEXTCODE)('*'); break;
+				case 0xf7: // 除号
+					ptcTmpCHN[i] = (TEXTCODE)(0x2215); break;
+				case 0x2014: // 横线
+					ptcTmpCHN[i] = (TEXTCODE)(0xff0d); break;
+				default: break;
+				}
+				pStrokeInfo[nStrokeID].uText3[i] = ptcTmpCHN[i];
+				pStrokeInfo[nStrokeID].nDistance3[i] = pu2TmpDist[i];
+			}
+			pStrokeInfo[nStrokeID].nCandCount3 = i;
+		}
+	}
+
+	//MakeDot2(psiStrokeInfo, nStrokeCount);
+	for (nStrokeID = 1; nStrokeID < nStrokeNum - 1; nStrokeID++)
+	{
+		if (pStrokeInfo[nStrokeID-1].nDistance1[0] == (TEXTCODE)(0xff0e) || 
+			pStrokeInfo[nStrokeID].nDistance1[0] == (TEXTCODE)(0xff0e) || 
+			pStrokeInfo[nStrokeID+1].nDistance1[0] == (TEXTCODE)(0xff0e))
+		{
+			continue;
+		}
+		nWidthP = pStrokeInfo[nStrokeID-1].rect.nRight - pStrokeInfo[nStrokeID-1].rect.nLeft + 1;
+		nWidth = pStrokeInfo[nStrokeID].rect.nRight - pStrokeInfo[nStrokeID].rect.nLeft + 1;
+		nWidthN = pStrokeInfo[nStrokeID+1].rect.nRight - pStrokeInfo[nStrokeID+1].rect.nLeft + 1;
+		nHeightP = pStrokeInfo[nStrokeID-1].rect.nBottom - pStrokeInfo[nStrokeID-1].rect.nTop + 1;
+		nHeight = pStrokeInfo[nStrokeID].rect.nBottom - pStrokeInfo[nStrokeID].rect.nTop + 1;
+		nHeightN = pStrokeInfo[nStrokeID+1].rect.nBottom - pStrokeInfo[nStrokeID+1].rect.nTop + 1;
+		if ((nWidth < 2 * nHeight) && 
+			((nHeight < 0.3 * nHeightP) || (nHeight < 0.3 * nHeightN)) && 
+			(nHeight < 0.5 * nHeightP) && 
+			(nHeight < 0.5 * nHeightN) && 
+			pStrokeInfo[nStrokeID-1].nDistance1[0] != 0x221A&& 
+			pStrokeInfo[nStrokeID+1].nDistance1[0] != 0x221A)
+		{
+			pStrokeInfo[nStrokeID].uText1[0] = (TEXTCODE)(0xff0e);
+		}
+	}
+
+	nCandPathNum = SplitRegionToGroup(uPntData, uPntNum,
+		pSplitPath, pStrokeInfo, nStrokeNum, pGlobalRam);
+#if 0
+	SplitStrategyRescore(pSplitPath, pStrokeInfo, nCandPathNum);
+#endif
+
+	//CollectSRResult(psrResult, pStrokeInfo, nStrokeNum, pSplitPath, nPathNum);
+
+	*pStrokeNum = nStrokeNum;
+	return nCandPathNum;
+}
