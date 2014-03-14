@@ -1,0 +1,1018 @@
+/******************************************************************
+* Function: HmcInit
+* Description: load database
+* Commit: Yang Hu
+* Call:
+* Call By:
+* General Variables:
+* Input & Output:
+*	->pDatabase:	database buffer
+*	->pGlobalRam:	global ram
+* Return:
+*	0	success
+*	else	fail
+* Others: Yejun Tang
+******************************************************************/
+#include "hmcCommon.h"
+#include "hmcSegment.h"
+#include "hmcSgmntGmm.h"
+#include "hmcRect.h"
+#include "wtpen_V4.h"
+#include "RecoCore.h"
+#include "ExtractFeature.h"
+#include <stdio.h>
+
+//for NUMPost
+#define HCR_MIN_NUMSTRK_LEN 8
+#define HCR_DOT_LIM_FOR_NUM 5 //用于模式2，因数字(除1之外)最少也有5个点
+#define HCR_POST_Y_INTERSEC_THRESH 8//for cross
+#define HCR_INTERSEC_DIST_THRESH 40
+// #define HCR_POST_Y_INTERSEC_THRESH 3//for cross
+// #define HCR_INTERSEC_DIST_THRESH 30
+#define MAX_RECOG_DISTANCE 48000
+#define MULTI_DISTANCE 1.4//1.3//1.29 //距离倍数
+//for NUMPost End
+int DebugCountNum = 0;
+static short IsDotADot(TEXTCODE tcSym)
+{
+	return (tcSym == (TEXTCODE)'.')
+		|| (tcSym == (TEXTCODE)'1')
+		|| (tcSym == (TEXTCODE)',')
+		|| (tcSym == (TEXTCODE)'-')
+		|| (tcSym == (TEXTCODE)'/')
+		|| (tcSym == (TEXTCODE)'*')
+		|| (tcSym == 0xd7)	/* 乘号 */
+		|| (tcSym == 0x4E00)/* 汉字一 */
+		|| (tcSym == (TEXTCODE)'0')
+		|| (tcSym == (TEXTCODE)'(')
+		|| (tcSym == (TEXTCODE)')')
+		|| (tcSym == (TEXTCODE)0x221A);
+}
+
+/******************************************************************
+* Function:
+* Description: get original stroke information
+* Call:
+* Call By:
+* General Variables:
+* Input & Output:
+* Return:
+******************************************************************/
+static short GetStrokeInfo(unsigned short uPntData[],
+					   const unsigned short uPntNum,
+					   PSTROKEINFOHCR pStrokeInfo)
+{
+	int i, j;
+	int nPntDataNum = ((int)uPntNum - 1) * 2;
+	short StrokeNo = 0;
+
+	unsigned long uSumX = 0, uSumY = 0;
+	unsigned short SingleStrokePtNum = 0; //笔划包含的点数，不包含笔终码0xff,0x00
+
+	unsigned short TopLeftX = 0xffff;
+	unsigned short TopLeftY = 0xffff;
+	unsigned short BottomRightX = 0;
+	unsigned short BottomRightY = 0;
+
+	pStrokeInfo[0].uStartPt = 0;
+	pStrokeInfo[0].nStartX = uPntData[0];
+	pStrokeInfo[0].nStartY = uPntData[1];
+	for (i = j = 0; j < nPntDataNum; i++)
+	{
+		if (uPntData[j] != 0xffff) //笔画坐标数据
+		{
+			if (uPntData[j] < TopLeftX)
+			{
+				TopLeftX = uPntData[j];
+			}
+			if (uPntData[j] > BottomRightX)
+			{
+				BottomRightX = uPntData[j];
+			}
+			uSumX += uPntData[j];
+			j++;
+
+			if (uPntData[j] < TopLeftY) 
+			{
+				TopLeftY = uPntData[j];
+			}
+			if (uPntData[j] > BottomRightY)
+			{
+				BottomRightY = uPntData[j];
+			}
+			uSumY += uPntData[j];
+			j++;
+
+			SingleStrokePtNum++;
+		}
+		else //读到笔终码,记录每个笔画的信息
+		{
+			if (StrokeNo >= HCR_MAX_STROKE)
+			{
+				break;
+			}
+
+			pStrokeInfo[StrokeNo].rect.nLeft = (short)TopLeftX;
+			pStrokeInfo[StrokeNo].rect.nTop = (short)TopLeftY;
+			pStrokeInfo[StrokeNo].rect.nRight = (short)BottomRightX;
+			pStrokeInfo[StrokeNo].rect.nBottom = (short)BottomRightY;
+			pStrokeInfo[StrokeNo].uPntNum = SingleStrokePtNum;
+
+			pStrokeInfo[StrokeNo].nEndX = uPntData[j-2];
+			pStrokeInfo[StrokeNo].nEndY = uPntData[j-1];
+			j += 2;
+
+			// if it's a 0-point stroke, skip it
+			if (SingleStrokePtNum > 0)
+			{
+				pStrokeInfo[StrokeNo].nGravX = (short)(uSumX / SingleStrokePtNum);
+				pStrokeInfo[StrokeNo].nGravY = (short)(uSumY / SingleStrokePtNum);
+				StrokeNo++;
+			}
+
+			uSumX = uSumY = 0;
+			SingleStrokePtNum =0;
+			TopLeftX = 0xffff;
+			TopLeftY = 0xffff;
+			BottomRightX = 0;
+			BottomRightY = 0;
+			pStrokeInfo[StrokeNo].uStartPt = i + 1;
+
+			pStrokeInfo[StrokeNo].nStartX = uPntData[2*pStrokeInfo[StrokeNo].uStartPt];
+			pStrokeInfo[StrokeNo].nStartY = uPntData[2*pStrokeInfo[StrokeNo].uStartPt+1];
+		}
+	}
+
+	return StrokeNo;
+}
+
+int isHorizontonLine(RECTHCR ppbx)
+{
+	int width = (ppbx.nRight - ppbx.nLeft > 0)?(ppbx.nRight - ppbx.nLeft):-(ppbx.nRight - ppbx.nLeft);
+	int height =  (ppbx.nTop - ppbx.nBottom > 0)?(ppbx.nTop - ppbx.nBottom):-(ppbx.nTop - ppbx.nBottom);
+	if ( (double)width > 2.5 *(double) height)
+		return 1;
+	else return 0;
+}
+int isVerticalLine(RECTHCR ppbx)
+{
+	int width = (ppbx.nRight - ppbx.nLeft > 0)?(ppbx.nRight - ppbx.nLeft):-(ppbx.nRight - ppbx.nLeft);
+	int height =  (ppbx.nTop - ppbx.nBottom > 0)?(ppbx.nTop - ppbx.nBottom):-(ppbx.nTop - ppbx.nBottom);
+	if ( (double)height > 2.5 *(double) width)
+		return 1;
+	else return 0;
+}
+
+// 利用规则修正数组ppfCFDMatrix中的数值
+static void AmendSplitGroupScore(int nStrokeCount, PSTROKEINFOHCR psiStrokeInfo, float* ppfCFDMatrix, unsigned short * pRawPntData)
+{
+	int i, nModified = 0, nNotmodified = 0;
+	const float BADCFD = -4000.0;
+	const float CFDSure = 8000.0;
+	const float CFDTH = 1000.0;
+	static int nChange = 0;
+	static int nTotal = 0;
+
+	for (int i = 0; i < HCR_MAX_STROKE * HC_MAX_STROKE_PER_GROUP; i++)
+	{
+		//if ( ppfCFDMatrix[i] > 0)
+			//printf("%d %x \n",ppfCFDMatrix[i],i );
+	}
+
+	//assert(nStrokeCount > 0);
+	//assert(psiStrokeInfo);
+	//assert(ppfCFDMatrix);
+
+	// 3笔划
+	for (i = 0; i < nStrokeCount - 2; ++i)
+	{
+		//CBoundBox abbx[3], bbx;
+		//CBoundBox *pbbx = abbx;
+
+		RECTHCR abbx[3], bbx;
+		RECTHCR *pbbx = abbx;
+
+		TEXTCODE atc[3], *ptc = atc;
+		int anCX[3], anCY[3];
+		int nCX, nCY;
+		int j, k;
+		int *pnCX = anCX, *pnCY = anCY;
+
+		++nTotal;
+		if (ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] > 500.0 || 
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] < -500.0)
+		{
+			continue;
+		}
+		for (j = 0; j < 3; ++j)
+		{
+			pbbx[j] = psiStrokeInfo[i + j].rect;
+			ptc[j] = psiStrokeInfo[i + j].uText1[0];
+		}
+		for (j = 0; j < 2; ++j)		// sorting
+		{
+			for (k = 0; k < 2 - j; ++k)
+			{
+				if (pbbx[k].nTop > pbbx[k+1].nTop)
+				{
+					FPExchange(RECTHCR, pbbx[k], pbbx[k+1]);
+					FPExchange(TEXTCODE, ptc[k], ptc[k+1]);
+				}
+			}
+		}
+		for (j = 0; j < 3; ++j)
+		{
+			//CenterPoint2(pnCX + j, pnCY + j, pbbx + j);
+			pnCX[j] = (pbbx[j].nLeft + pbbx[j].nRight)/2;
+			pnCY[j] = (pbbx[j].nTop + pbbx[j].nBottom)/2;
+		}
+		bbx = pbbx[0];
+		//Union2(pbbx + 1, &bbx);
+		bbx.nLeft = min(bbx.nLeft, pbbx[1].nLeft);
+		bbx.nRight = max(bbx.nRight, pbbx[1].nRight);
+		bbx.nTop = min(bbx.nTop, pbbx[1].nTop);
+		bbx.nBottom = max(bbx.nBottom, pbbx[1].nBottom);
+		//Union2(pbbx + 2, &bbx);
+		bbx.nLeft = min(bbx.nLeft, pbbx[2].nLeft);
+		bbx.nRight = max(bbx.nRight, pbbx[2].nRight);
+		bbx.nTop = min(bbx.nTop, pbbx[2].nTop);
+		bbx.nBottom = max(bbx.nBottom, pbbx[2].nBottom);
+		//CenterPoint2(&nCX, &nCY, &bbx);
+		nCX = (bbx.nLeft + bbx.nRight)/2;
+		nCY = (bbx.nTop + bbx.nBottom)/2;
+
+
+		if ((RECT_WIDTH(pbbx + 1) > 2 * RECT_HEIGHT(pbbx + 1))
+			&&	(max(pbbx[0].nRight, pbbx[2].nRight) < pbbx[1].nRight + 0.16f * RECT_WIDTH(pbbx + 1))
+			&&	(min(pbbx[0].nLeft, pbbx[2].nLeft)   > pbbx[1].nLeft - 0.16f * RECT_WIDTH(pbbx + 1))
+			&&	(pbbx[0].nBottom < pbbx[1].nTop + 4)
+			&&	(pbbx[2].nTop > pbbx[1].nBottom - 4)
+			&&	(2 * RECT_WIDTH(pbbx + 0) < 2 * RECT_WIDTH(pbbx + 1))
+			&&	(2 * RECT_WIDTH(pbbx + 2) < 2 * RECT_WIDTH(pbbx + 1))
+			||(	IsDotADot(ptc[0]) 
+			&&IsDotADot(ptc[2]))                           //除号
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff0d;
+		}
+		else if ( (isHorizontonLine(pbbx[0] ) && isHorizontonLine(pbbx[2]))
+			&&(pbbx[2].nRight < pbbx[1].nRight )
+			&&(Overlap2(pbbx+0,pbbx+1,BBO_HORZ) > 0.6 * RECT_WIDTH(pbbx + 1))
+			&&(Overlap2(pbbx+2,pbbx+1,BBO_HORZ) > 0.6 * RECT_WIDTH(pbbx + 2))
+			)                                           // E 写法是横，竖折，横
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff25;
+		}
+		else if ((isHorizontonLine(pbbx[0] ) && isHorizontonLine(pbbx[2]))
+			&&(pbbx[2].nRight > pbbx[1].nRight +10 )
+			&& RECT_HEIGHT(pbbx + 1) > 2.5 * RECT_WIDTH(pbbx + 1)  
+			&& pbbx[1].nBottom > pbbx[2].nBottom
+			)                                           // F , 写法是横，竖，横
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff26;
+		}
+		else if ((isHorizontonLine(pbbx[0] ) && isHorizontonLine(pbbx[1]))
+			&&(pbbx[1].nRight > pbbx[2].nRight +10 )
+			&& RECT_HEIGHT(pbbx + 2) > 2.5 * RECT_WIDTH(pbbx + 2)   
+			)                                           // F , 写法是横，横，竖
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff26;
+		}
+		else if ((isHorizontonLine(pbbx[2] ) && isHorizontonLine(pbbx[1]))
+			&&(pbbx[1].nRight > pbbx[0].nRight +10 )
+			&& RECT_HEIGHT(pbbx + 0) > 2.5 * RECT_WIDTH(pbbx + 0)   
+			)                                           // F , 写法是竖 横，横
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff26;
+		}
+		else if ((isVerticalLine(pbbx[1] ) && isVerticalLine(pbbx[0]))
+			&& (Overlap2(pbbx+0,pbbx+1,BBO_VERT) > 0.4 * RECT_HEIGHT(pbbx + 0))
+			&& isHorizontonLine(pbbx[2])   
+			)                                           // H , 写法是竖 竖 横
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff28;
+		}
+		else if ((isHorizontonLine(pbbx[2] ) && isHorizontonLine(pbbx[0]))
+			&& (Overlap2(pbbx+0,pbbx+2,BBO_HORZ) > 0.4 * RECT_WIDTH(pbbx + 2))
+			&& isVerticalLine(pbbx[1])   
+			&& pbbx[1].nBottom < pbbx[2].nBottom
+			)                                           // I , 写法是 横 竖 横 
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0xff29;
+		}
+		else if ((isVerticalLine(pbbx[2] ) && isVerticalLine(pbbx[1]))
+			&& (Overlap2(pbbx+1,pbbx+2,BBO_VERT) > 0.4 * RECT_HEIGHT(pbbx + 1))
+			&& isHorizontonLine(pbbx[0])   
+			)                                           // ∏ , 写法是 横 竖 竖 
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+			psiStrokeInfo[i].uText3[0] = 0x220f;
+		}
+		else {
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 2] = BADCFD;
+				++nChange;
+		}
+		
+		
+		
+		unsigned short crossNum = 0;               
+		crossNum += CalCrossPoint(pRawPntData, psiStrokeInfo , i, i+1);
+		crossNum += CalCrossPoint(pRawPntData ,psiStrokeInfo , i, i+2);
+		crossNum += CalCrossPoint(pRawPntData, psiStrokeInfo , i+1, i+2);
+		if (crossNum >= 2)
+		{
+			ppfCFDMatrix[i* HC_MAX_STROKE_PER_GROUP + 2] = CFDSure;
+		}
+	}
+
+	// 2笔划和部分1笔划
+	for (i = 0; i < nStrokeCount - 1; ++i)
+	{
+		RECTHCR bbxPre, bbxCur, bbxUnion;
+		short nExchangeFlag;
+		int nCX1, nCX2, nCY1, nCY2, nCX, nCY;
+		int Compulsory = 0;
+		//          by WangJing	
+		if (CalCrossPoint(pRawPntData, psiStrokeInfo , i, i+1) )
+		{
+			if (i == 0 && ppfCFDMatrix[i* HC_MAX_STROKE_PER_GROUP+2 ] < CFDSure)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			}
+			else if (i == 1 &&  ppfCFDMatrix[i* HC_MAX_STROKE_PER_GROUP+2 ] < CFDSure
+				&&  ppfCFDMatrix[(i-1)* HC_MAX_STROKE_PER_GROUP+2 ] < CFDSure)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			}
+			else if ( i > 1 && ppfCFDMatrix[i* HC_MAX_STROKE_PER_GROUP+2 ] < CFDSure
+				&&  ppfCFDMatrix[(i-1)* HC_MAX_STROKE_PER_GROUP+2 ] < CFDSure
+				&& ppfCFDMatrix[(i-2) * HC_MAX_STROKE_PER_GROUP+2] <CFDSure)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			}
+		}
+
+		//// 强制修正的内容 (不论打分如何, 均需经此修正)
+		//// 加号1
+		//if (
+		//	RECT_WIDTH(&(psiStrokeInfo[i  ].rect)) > 1.5 * RECT_HEIGHT(&(psiStrokeInfo[i  ].rect))
+		//	&&  RECT_HEIGHT(&(psiStrokeInfo[i+1].rect)) > 1.5 * RECT_WIDTH(&(psiStrokeInfo[i+1].rect))
+		//	&&	Overlap2(&(psiStrokeInfo[i  ].rect), 
+		//	&(psiStrokeInfo[i+1].rect), 
+		//	BBO_HORZ)
+		//	== min(RECT_WIDTH(&(psiStrokeInfo[i  ].rect)), 
+		//	RECT_WIDTH(&(psiStrokeInfo[i+1].rect))) + 1
+		//	&&	Overlap2(&(psiStrokeInfo[i  ].rect), 
+		//	&(psiStrokeInfo[i+1].rect), 
+		//	BBO_VERT)
+		//	== min(RECT_HEIGHT(&(psiStrokeInfo[i  ].rect)), 
+		//	RECT_HEIGHT(&(psiStrokeInfo[i+1].rect))) + 1
+		//	&&  psiStrokeInfo[i].uText2[0] == 0xff0b // 首选为加号
+		//	)
+		//{
+		//	ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+		//	Compulsory = 1;
+		//}
+		//// 加号2
+		//else if (
+		//	RECT_WIDTH(&(psiStrokeInfo[i+1].rect)) > 1.5 * RECT_HEIGHT(&(psiStrokeInfo[i+1].rect))
+		//	&&  RECT_HEIGHT(&(psiStrokeInfo[i  ].rect)) > 1.5 * RECT_WIDTH(&(psiStrokeInfo[i  ].rect))
+		//	&&	Overlap2(&(psiStrokeInfo[i  ].rect), 
+		//	&(psiStrokeInfo[i+1].rect), 
+		//	BBO_HORZ) 
+		//	== min(RECT_WIDTH(&(psiStrokeInfo[i  ].rect)), 
+		//	RECT_WIDTH(&(psiStrokeInfo[i+1].rect)))
+		//	&&	Overlap2(&(psiStrokeInfo[i  ].rect), 
+		//	&(psiStrokeInfo[i+1].rect), 
+		//	BBO_VERT) 
+		//	== min(RECT_HEIGHT(&(psiStrokeInfo[i  ].rect)), 
+		//	RECT_HEIGHT(&(psiStrokeInfo[i+1].rect)))
+		//	&&  psiStrokeInfo[i].uText2[0] == 0xff0b // 首选为加号
+		//	)
+		//{
+		//	ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+		//	Compulsory = 1;
+		//}
+
+		//// 乘号肯定
+		//else if (	psiStrokeInfo[i].uText2[0] == 0x00d7 // 首选为乘号
+		//	&&	Overlap2(&(psiStrokeInfo[i].rect), &(psiStrokeInfo[i+1].rect), BBO_AREA)
+		//> 0.5 * min(Area2(&(psiStrokeInfo[i].rect)), Area2(&(psiStrokeInfo[i+1].rect)))
+		//&&  Area2(&(psiStrokeInfo[i].rect)) < 4.0 * Area2(&(psiStrokeInfo[i+1].rect))
+		//&&  Area2(&(psiStrokeInfo[i+1].rect)) < 4.0 * Area2(&(psiStrokeInfo[i].rect))
+		//)
+		//{
+		//	ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+		//	Compulsory = 1;
+		//}
+
+
+		//// 乘号否定
+		//else if (	psiStrokeInfo[i].uText2[0] == 0x00d7 
+		//	&&	Overlap2(&(psiStrokeInfo[i].rect), &(psiStrokeInfo[i+1].rect), BBO_AREA)
+		//	< 0.2 * min(Area2(&(psiStrokeInfo[i].rect)), Area2(&(psiStrokeInfo[i+1].rect)))
+		//	)
+		//{
+		//	ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+		//	Compulsory = -1;
+		//}
+
+
+		//// 数字 '5' 的肯定：情况1
+		//else if (
+		//	(psiStrokeInfo[i].uText2[0] == 0xff15
+		//	||  psiStrokeInfo[i].uText2[0] == 0xff18)
+		//	&&	(psiStrokeInfo[i].uText1[0] == 0xff13 
+		//	||	psiStrokeInfo[i].uText1[0] == 0xff15
+		//	||	psiStrokeInfo[i].uText1[0] == 0xff17
+		//	||  psiStrokeInfo[i].uText1[0] == 0xff19)
+		//	&&	(psiStrokeInfo[i+1].uText1[0] == 0x2215
+		//	||	psiStrokeInfo[i+1].uText1[0] == 0xff0d
+		//	||	psiStrokeInfo[i+1].uText1[0] == 0x00d7)
+		//	)
+		//{
+		//	short flag = 1;
+		//	bbxPre = psiStrokeInfo[i].rect;		// '5' 的弯笔
+		//	bbxCur = psiStrokeInfo[i+1].rect;	// '5' 的短笔
+		//	flag &= (bbxCur.nLeft >= bbxPre.nLeft - 0.35f * RECT_WIDTH(&bbxPre));
+		//	flag &= (bbxCur.nLeft <= bbxPre.nRight + 0.5f * RECT_WIDTH(&bbxPre));
+		//	flag &= (bbxCur.nBottom <= bbxPre.nBottom + 0.5f * RECT_HEIGHT(&bbxPre));
+		//	flag &= (bbxCur.nBottom > bbxPre.nTop + 0.2f * RECT_WIDTH(&bbxPre));
+		//	if (flag)
+		//	{
+		//		ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+		//		psiStrokeInfo[i].uText2[0] = 0xff15;
+		//		Compulsory = 1;
+		//	}
+		//}
+		//// added by Jiang Han on 2010-01-11
+		//// 数字 '5' 的肯定：情况2
+		//else if (
+		//	(psiStrokeInfo[i].uText2[0] == 0xff15
+		//	||  psiStrokeInfo[i].uText2[0] ==  0xff18)
+		//	&&	(psiStrokeInfo[i+1].uText1[0] ==  0xff13
+		//	||	psiStrokeInfo[i+1].uText1[0] ==  0xff15
+		//	||	psiStrokeInfo[i+1].uText1[0] ==  0xff17
+		//	||	psiStrokeInfo[i+1].uText1[0] ==  0xff19)
+		//	&&	(psiStrokeInfo[i].uText1[0] == 0x2215
+		//	||	psiStrokeInfo[i].uText1[0] ==  0xff0d
+		//	||	psiStrokeInfo[i].uText1[0] ==  0x00d7)
+		//	)
+		//{
+		//	short flag = 1;
+		//	bbxPre = psiStrokeInfo[i+1].rect;		// '5' 的弯笔
+		//	bbxCur = psiStrokeInfo[i].rect;	// '5' 的短笔
+		//	flag &= (bbxCur.nLeft >= bbxPre.nLeft - 0.35f * RECT_WIDTH(&bbxPre));
+		//	flag &= (bbxCur.nLeft <= bbxPre.nRight + 0.5f * RECT_WIDTH(&bbxPre));
+		//	flag &= (bbxCur.nBottom <= bbxPre.nBottom + 0.5f * RECT_HEIGHT(&bbxPre));
+		//	flag &= (bbxCur.nBottom > bbxPre.nTop + 0.2f * RECT_WIDTH(&bbxPre));
+		//	
+		//	if (flag)
+		//	{
+		//		ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+		//		psiStrokeInfo[i].uText2[0] = 0xff15;
+		//		Compulsory = 1;
+		//	}
+		//}
+		 if (Overlap2(&(psiStrokeInfo[i].rect), &(psiStrokeInfo[i+1].rect), BBO_HORZ) > 0.6 * (psiStrokeInfo[i].rect.nRight - psiStrokeInfo[i].rect.nLeft)
+			&& isHorizontonLine((psiStrokeInfo[i].rect)) && isHorizontonLine((psiStrokeInfo[i+1].rect))
+			)																		 // =
+		{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+				psiStrokeInfo[i].uText2[0] = 0xff1d;
+				Compulsory = 1;
+		}
+		else if ((psiStrokeInfo[i].uText2[0] == 0xff49
+			&& psiStrokeInfo[i].uText1[0] == 0x002e 
+			||psiStrokeInfo[i+1].uText1[0] == 0x002e)
+			||(psiStrokeInfo[i].uText1[0] == 0x002e && psiStrokeInfo[i+1].uText1[0] == 0x03c4)
+			)																		// i
+		{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+				psiStrokeInfo[i].uText2[0] = 0xff49;
+				Compulsory = 1;
+		}
+		else if (psiStrokeInfo[i].uText2[0] = 0xff4a
+			&& psiStrokeInfo[i].uText1[0] == 0x002e
+			||psiStrokeInfo[i+1].uText1[0] == 0x002e
+			)																		// j
+		{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+				psiStrokeInfo[i].uText2[0] = 0xff4a;
+				Compulsory = 1;
+		}
+
+	
+
+		// added by Yang Hu on 2013-10-13
+		// 两笔分开的一般情况
+		{
+			short flag = 1;
+			bbxPre = psiStrokeInfo[i].rect;
+			CenterPoint2(&nCX1, &nCY1, &bbxPre);
+			CenterPoint2(&nCX2, &nCY2, &bbxCur);
+			bbxCur = psiStrokeInfo[i + 1].rect;
+			flag &= (short)(RECT_HEIGHT(&bbxPre) < 1.6f * RECT_HEIGHT(&bbxCur));
+			flag &= (short)(RECT_HEIGHT(&bbxCur) < 1.6f * RECT_HEIGHT(&bbxPre));
+			flag &= (short)(abs(nCY1 - nCY2) < 0.6f * RECT_HEIGHT(&bbxCur));
+			flag &= (short)(abs(nCY1 - nCY2) < 0.6f * RECT_HEIGHT(&bbxPre));
+			flag &= (short)(RECT_WIDTH(&bbxPre) < 0.8f * RECT_HEIGHT(&bbxPre));
+			flag &= (short)(RECT_WIDTH(&bbxCur) < 0.8f * RECT_HEIGHT(&bbxPre));
+			flag &= (short)(Overlap2(&bbxPre, &bbxCur, BBO_HORZ) <= 0.3f * 
+				max(RECT_WIDTH(&bbxPre), RECT_WIDTH(&bbxCur)));
+			flag &= (short)((psiStrokeInfo[i].uText2[0] != 0xff14) || (Overlap2(&bbxPre, &bbxCur, BBO_HORZ) == 0 ));
+			if (flag)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+				Compulsory = -1;
+			}
+		}
+		for (int Cand_num = 0; Cand_num < FP_CHNCAND_NUM; Cand_num++)
+		if (psiStrokeInfo->uText1[Cand_num] == 0x0000 )             // 0x0000
+			{
+				psiStrokeInfo->uText1[Cand_num] = psiStrokeInfo->uText1[Cand_num+1];
+			}
+
+		for (int Cand_num = 0; Cand_num < FP_CHNCAND_NUM; Cand_num++)
+		if (psiStrokeInfo->uText2[Cand_num] == 0x0000 )             // 0x0000
+			{
+				psiStrokeInfo->uText2[Cand_num] = psiStrokeInfo->uText2[Cand_num+1];
+			}
+		for (int Cand_num = 0; Cand_num < FP_CHNCAND_NUM; Cand_num++)
+		if (psiStrokeInfo->uText3[Cand_num] == 0x0000 )             // 0x0000
+			{
+				psiStrokeInfo->uText3[Cand_num] = psiStrokeInfo->uText3[Cand_num+1];
+			}
+		// added by Yang Hu on 2013-10-13
+		// 两笔合并的一般情况
+		{
+			short flagA = 1, flagB = 1;
+			bbxPre = psiStrokeInfo[i].rect;
+			bbxCur = psiStrokeInfo[i+1].rect;
+			flagA &= (short)(bbxPre.nLeft < bbxCur.nLeft);
+			flagA &= (short)(bbxPre.nRight > bbxCur.nRight);
+			flagA &= (short)(bbxPre.nTop > bbxCur.nTop);
+			flagA &= (short)(bbxPre.nBottom < bbxCur.nBottom);    // 包围与被包围(四个方向，不同于根号)
+			
+			flagB &= (short)(bbxPre.nLeft > bbxCur.nLeft);
+			flagB &= (short)(bbxPre.nRight < bbxCur.nRight);
+			flagB &= (short)(bbxPre.nTop < bbxCur.nTop);
+			flagB &= (short)(bbxPre.nBottom > bbxCur.nBottom);
+			if (flagA || flagB|| CalCrossPoint(pRawPntData,psiStrokeInfo,i,i+1))
+			{	
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = 10 * CFDSure;
+				Compulsory = -1;        // -1 ??
+			}
+		}
+
+		// added by Yang Hu on 2013-10-13
+		// 保证两笔写成的根号得以合并
+		nExchangeFlag = 0;
+		bbxPre = psiStrokeInfo[i].rect;
+		bbxCur = psiStrokeInfo[i+1].rect;
+		if (bbxPre.nRight > bbxCur.nRight)	// 横线挪后
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		if (	RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5
+			&&	RECT_WIDTH(&bbxPre) < 1.2 * RECT_HEIGHT(&bbxPre)
+			&&  Compulsory == 0
+			)
+		{
+			int nUpperFlag = 0;
+			int xDist = bbxCur.nLeft - bbxPre.nRight;
+			int yDist = (bbxCur.nBottom + bbxCur.nTop) / 2 - bbxPre.nTop;
+			int leftIndex = nExchangeFlag ? i+1 : i;
+			TEXTCODE leftChar = psiStrokeInfo[leftIndex].uText1[0];
+			if (	RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5
+				&&	RECT_WIDTH(&bbxPre) < 1.2 * RECT_HEIGHT(&bbxPre)
+				)
+			{
+				int xDist = bbxCur.nLeft - bbxPre.nRight;
+				int yDist = (bbxCur.nBottom + bbxCur.nTop) / 2 - bbxPre.nTop;
+				int leftIndex = nExchangeFlag ? i+1 : i;
+				TEXTCODE leftChar = psiStrokeInfo[leftIndex].uText1[0];
+				int k;
+				//short nUpperFlag;
+				int iTemp = nExchangeFlag ? i : i + 1;	// 横线
+				int jTemp = (iTemp == i) ? i+1 : i;		
+				CenterPoint2(&nCX1, &nCY1, &bbxCur);
+				// 遍历所有笔划以确认横线上方是否有笔划
+				nUpperFlag = 0;
+				for (k = 0; k < nStrokeCount; ++k)
+				{
+					RECTHCR bbxTemp;
+					int nCXTemp, nCYTemp;
+
+					if (k == iTemp)
+					{
+						continue;
+					}
+
+					bbxTemp = psiStrokeInfo[k].rect;
+					CenterPoint2(&nCXTemp, &nCYTemp, &bbxTemp);
+					if (nCXTemp < bbxCur.nRight 
+						&& nCXTemp > bbxCur.nLeft 
+						&& nCYTemp < nCY1
+						&& nCY1 - nCYTemp < 1.25 * RECT_HEIGHT(&bbxTemp)
+						&& bbxCur.nTop - bbxTemp.nBottom < 0.65 * RECT_HEIGHT(&bbxTemp)
+						&& bbxCur.nTop - bbxTemp.nBottom <= 50
+						&& psiStrokeInfo[k].uText1[0] != 0xff0d
+						)
+					{
+						nUpperFlag = 1;
+						//break;
+					}
+					else if (nCXTemp < bbxCur.nRight 
+						&& nCXTemp > bbxCur.nLeft 
+						&& nCYTemp < nCY1
+						&& nCY1 - nCYTemp < 1.25 * RECT_HEIGHT(&bbxTemp)
+						&& bbxCur.nTop - bbxTemp.nBottom < 0.65 * RECT_HEIGHT(&bbxTemp)
+						&& bbxCur.nTop - bbxTemp.nBottom <= 50
+						&& psiStrokeInfo[k].uText1[0] == 0xff0d
+						)
+					{
+						nUpperFlag = 0;
+						//break;
+					}
+				}
+			}
+
+			if (	nUpperFlag == 0
+				&& 	xDist > -0.5f * RECT_HEIGHT(&bbxPre)
+				&&	xDist < 0.2f * RECT_HEIGHT(&bbxPre)
+				&&	yDist > -0.2f * RECT_HEIGHT(&bbxPre)
+				&&	yDist < 0.2f * RECT_HEIGHT(&bbxPre)
+				&&  (leftChar == 0xff11
+				||	leftChar == (TEXTCODE)(0x221A)
+				||  leftChar == (TEXTCODE)(0xff0d)
+				||	leftChar == (TEXTCODE)(0xff09)
+				||	leftChar == (TEXTCODE)(0x002e)
+				||	leftChar == (TEXTCODE)(0x00d7)
+				||	leftChar == (TEXTCODE)(0xff14)
+				||	leftChar == (TEXTCODE)(0xff1d))
+				)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+				psiStrokeInfo[i].uText2[0] = 0x221A;
+				continue;
+			}
+			else if (nUpperFlag)
+			{
+				ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			}
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+		}
+
+		if (Compulsory)
+		{
+			continue;
+		}
+
+		// 切分点置信度足够高，则无需修正
+		if ((ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] > CFDTH || 
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] < -CFDTH) 
+			&& (psiStrokeInfo[i].uText1[0] != 0x221A) 
+			&& (psiStrokeInfo[i].uText1[0] != '='))
+		{
+			++nNotmodified;
+			continue;
+		}
+
+		// 前笔划索引号为i，后笔划索引号为i+1
+		// 变量初始化
+		bbxPre = psiStrokeInfo[i	].rect;
+		bbxCur = psiStrokeInfo[i + 1].rect;
+		bbxUnion = bbxPre;
+		Union2(&bbxCur, &bbxUnion);
+		CenterPoint2(&nCX, &nCY, &bbxUnion);		
+
+		// 很像加号的情形
+		nExchangeFlag = 0;
+		if (RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+		if (	RECT_WIDTH(&bbxPre) * 2 > RECT_HEIGHT(&bbxPre) * 5
+			&&	RECT_WIDTH(&bbxCur) * 5 < RECT_HEIGHT(&bbxCur) * 2
+			&&  (bbxPre.nRight - bbxCur.nLeft) * 4 > RECT_WIDTH(&bbxPre)
+			&&  (bbxCur.nRight - bbxPre.nLeft) * 4 > RECT_WIDTH(&bbxPre)
+			&&  (bbxPre.nTop - bbxCur.nTop) * 3 > RECT_HEIGHT(&bbxCur)
+			&&  (bbxCur.nBottom - bbxPre.nBottom) * 3 > RECT_HEIGHT(&bbxCur)
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			++nModified;
+			continue;
+		}
+		/*if (nExchangeFlag)
+		FPExchange(StrokeInfo, psiStrokeInfo[i], psiStrokeInfo[i+1]);*/
+		if (    psiStrokeInfo[i].uText1[0] == 0xff0d
+			&&	(psiStrokeInfo[i+1].uText1[0] == 0xff11
+			||	psiStrokeInfo[i+1].uText1[0] ==0x2215)
+			&&	psiStrokeInfo[i].uText2[0] == 0xff0b
+			&&  bbxPre.nRight > bbxCur.nLeft
+			&&  bbxCur.nRight > bbxPre.nLeft
+			&&  bbxCur.nTop > bbxPre.nBottom
+			&&  bbxPre.nTop > bbxCur.nBottom
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			++nModified;
+			continue;
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			/*FPExchange(StrokeInfo, psiStrokeInfo[i], psiStrokeInfo[i+1]);*/
+		}
+
+		// x-、-x型切分
+		nExchangeFlag = 0;
+		if (RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5)	// 长扁笔划放前面
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+		if (	RECT_WIDTH(&bbxPre) * 2 > RECT_HEIGHT(&bbxPre) * 5
+			&&	Overlap2(&bbxPre, &bbxCur, BBO_HORZ) * 6 < RECT_WIDTH(&bbxUnion)
+			&&	(nCY1 - bbxCur.nTop) * 3 > RECT_HEIGHT(&bbxUnion)
+			&&	(bbxCur.nBottom - nCY1) * 3 > RECT_HEIGHT(&bbxUnion)
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			++nModified;
+			continue;
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+		}
+
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+		if (	RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5
+			&&	RECT_WIDTH(&bbxPre) * 2 > RECT_HEIGHT(&bbxPre) * 5
+			&&	abs(nCX1 - nCX2) * 3 < RECT_WIDTH(&bbxUnion)
+			&&  abs(nCY1 - nCY2) * 3 > RECT_HEIGHT(&bbxUnion)
+			&&	max(RECT_WIDTH(&bbxCur), RECT_WIDTH(&bbxPre)) < 1.5 * min(RECT_WIDTH(&bbxCur), RECT_WIDTH(&bbxPre))
+			&&  psiStrokeInfo[i].uText1[0] == 0xff0d
+			&&  psiStrokeInfo[i+1].uText1[0] == 0xff0d
+			&&  psiStrokeInfo[i].uText2[0] == 0xff1d
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+			++nModified;
+			continue;
+		}
+
+		// 横线在下切分
+		nExchangeFlag = 0;
+		if (RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+		if (	RECT_WIDTH(&bbxPre) * 2 > RECT_HEIGHT(&bbxPre) * 5
+			&&	nCX2 < bbxPre.nRight
+			&&	nCX2 > bbxPre.nLeft
+			&&	(nCY1 - nCY2) * 4 > RECT_HEIGHT(&bbxCur)
+			&&  nCY1 > bbxCur.nBottom
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			++nModified;
+			continue;
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+		}
+
+		// 横线在上切分
+		nExchangeFlag = 0;
+		if (RECT_WIDTH(&bbxCur) * 2 > RECT_HEIGHT(&bbxCur) * 5)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+
+		if (	RECT_WIDTH(&bbxPre) * 2 > RECT_HEIGHT(&bbxPre) * 5
+			&&	nCX2 < bbxPre.nRight
+			&&	bbxCur.nRight > bbxPre.nLeft
+			&&	(nCY2 - nCY1) * 4 > RECT_HEIGHT(&bbxCur)
+			&&  nCY1 < bbxCur.nTop
+			)
+		{
+			// 先写横的数字 5
+			if (
+				(psiStrokeInfo[i].uText1[0] == 0xff13
+				|| psiStrokeInfo[i+1].uText1[0] == 0xff13
+				|| psiStrokeInfo[i].uText1[0] == 0xff15
+				|| psiStrokeInfo[i+1].uText1[0] == 0xff15
+				|| psiStrokeInfo[i].uText2[0] == 0xff15
+				|| psiStrokeInfo[i].uText2[0] == 0xff0d)
+
+				&& RECT_WIDTH(&bbxPre) < 2.0 * RECT_WIDTH(&bbxCur)
+				)
+			{
+				int k;
+				short nUpperFlag;
+				int iTemp = nExchangeFlag ? i+1 : i;	// 横线
+				int jTemp = (iTemp == i) ? i+1 : i;		
+
+				// 遍历所有笔划以确认横线上方是否有笔划
+				nUpperFlag = 0;
+				for (k = 0; k < nStrokeCount; ++k)
+				{
+					RECTHCR bbxTemp;
+					int nCXTemp, nCYTemp;
+
+					if (k == iTemp)
+					{
+						continue;
+					}
+
+					bbxTemp = psiStrokeInfo[k].rect;
+					CenterPoint2(&nCXTemp, &nCYTemp, &bbxTemp);
+
+					if (nCXTemp < bbxPre.nRight 
+						&& nCXTemp > bbxPre.nLeft 
+						&& nCYTemp < nCY1
+						&& nCY1 - nCYTemp < 1.25 * RECT_HEIGHT(&bbxTemp)
+						&& bbxPre.nTop - bbxTemp.nBottom < 0.65 * RECT_HEIGHT(&bbxTemp)
+						&& bbxPre.nTop - bbxTemp.nBottom <= 50
+						)
+					{
+						nUpperFlag = 1;
+						break;
+					}
+				}
+				if (nUpperFlag == 0)
+				{
+					ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = CFDSure;
+					continue;
+				}
+			}
+
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			++nModified;
+			continue;
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+		}
+
+		// 左下-右上或右上-左下切分
+		nExchangeFlag = 0;
+		if (bbxPre.nBottom < bbxCur.nBottom)		// 上笔移到后面
+			// top 改成 bottom
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+			nExchangeFlag = 1;
+		}
+		CenterPoint2(&nCX1, &nCY1, &bbxPre);
+		CenterPoint2(&nCX2, &nCY2, &bbxCur);
+		if (	((bbxPre.nTop > bbxCur.nBottom + 0.3 * RECT_HEIGHT(&bbxCur)
+			&&	(Overlap2(&bbxCur, &bbxPre, BBO_HORZ) <= 0 || Overlap2(&bbxCur, &bbxPre, BBO_VERT) <= 0))
+			||  (2 * RECT_WIDTH(&bbxPre) < RECT_HEIGHT(&bbxPre)
+			&&	bbxCur.nBottom < bbxPre.nTop + 0.3 * RECT_HEIGHT(&bbxPre))
+			||  (bbxPre.nTop > bbxCur.nBottom - 0.5 * RECT_HEIGHT(&bbxCur)
+			&&  bbxCur.nLeft > bbxPre.nRight + 0.2 * min(RECT_WIDTH(&bbxPre), RECT_WIDTH(&bbxCur))))
+			&&  psiStrokeInfo[i].uText2[0] != '5'
+			&&  psiStrokeInfo[i].uText2[0] != 0x221A
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			++nModified;
+			continue;
+		}
+		if (nExchangeFlag)
+		{
+			FPExchange(RECTHCR, bbxCur, bbxPre);
+		}
+
+		// 单笔根号
+		if (	(psiStrokeInfo[i].uText1[0] == 0x221A
+			||	psiStrokeInfo[i].uText1[0] == '=')
+			&&	5 * Overlap2(&bbxPre, &bbxCur, BBO_AREA) > 3 * Area2(&bbxCur)	// l > 0.6r
+			&&	max(RECT_WIDTH(&bbxCur), RECT_HEIGHT(&bbxPre)) > 8
+			)
+		{
+			//ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 0] = CFDSure;
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			++nModified;
+			continue;
+		}
+		
+
+		
+
+		// added by Yang Hu on 2013-10-13
+		if ((psiStrokeInfo[i].uText1[0] == 0x2215)
+			&& (RECT_WIDTH(&psiStrokeInfo[i].rect) < 1.4f * RECT_HEIGHT(&psiStrokeInfo[i].rect))
+			&& (Overlap2(&psiStrokeInfo[i].rect, &psiStrokeInfo[i+1].rect, BBO_AREA)
+			> 0.6f * Area2(&psiStrokeInfo[i+1].rect))
+			)
+		{
+			ppfCFDMatrix[i * HC_MAX_STROKE_PER_GROUP + 1] = -CFDSure;
+			continue;
+		}
+	}
+}
+
+static unsigned short GetStrokeStruInfobyPnt(unsigned short uPntData[], 
+									  unsigned short unPntNum, 
+									  StrokeInfo2 *pStroStruInfo)
+{
+	unsigned short SingleStrokePtNum = 0; //笔划包含的点数，不包含笔终码0xff,0x00
+	unsigned short TopLeftX = 65535;     //矩形框左上角坐标 
+	unsigned short TopLeftY = 65535;
+	unsigned short BottomRightX = 0; //矩形框右下角坐标
+	unsigned short BottomRightY = 0;
+
+	unsigned short StrokeNo = 0;
+	int nSumX = 0;
+	int nSumY = 0;
+
+	unsigned short i=0;
+
+	for(i = 0;i < unPntNum-1;i++)
+	{
+		if (!(uPntData[2*i]==0xffff && uPntData[2*i+1]==0x0000)) //笔画坐标数据
+		{
+			if (uPntData[2*i] < TopLeftX) //x
+			{
+				TopLeftX = uPntData[2*i];
+			}
+			if (uPntData[2*i] > BottomRightX) //x
+			{
+				BottomRightX = uPntData[2*i];
+			}
+
+			if (uPntData[2*i+1] < TopLeftY)//y 
+			{
+				TopLeftY = uPntData[2*i+1];
+			}
+			if (uPntData[2*i+1] > BottomRightY) //y
+			{
+				BottomRightY = uPntData[2*i+1];
+			}
+
+			nSumX += uPntData[2*i];
+			nSumY += uPntData[2*i+1];
+			SingleStrokePtNum++;
+		}
+		else //读到笔终码,记录每个笔画的信息
+		{
+			pStroStruInfo[StrokeNo].rectOneStroke.unXTop = TopLeftX;
+			pStroStruInfo[StrokeNo].rectOneStroke.unYTop = TopLeftY;
+			pStroStruInfo[StrokeNo].rectOneStroke.unXBottom = BottomRightX;
+			pStroStruInfo[StrokeNo].rectOneStroke.unYBottom = BottomRightY;
+			
+			pStroStruInfo[StrokeNo].unStrokePtNum = SingleStrokePtNum;
+			pStroStruInfo[StrokeNo].unStrokeNo = StrokeNo;
+			pStroStruInfo[StrokeNo].unStrokeStartPt = i - SingleStrokePtNum;
+
+			pStroStruInfo[StrokeNo].nCenterX = (short)(nSumX / SingleStrokePtNum);
+			pStroStruInfo[StrokeNo].nCenterY = (short)(nSumY / SingleStrokePtNum);
+		
+			nSumX = nSumY = 0;
+			SingleStrokePtNum =0;
+			StrokeNo++;
+			if (StrokeNo >= HCR_MAX_STROKE)
+			{
+				return 0;
+			}
+
+			TopLeftX = 65535;//注意：这个值要改变，已经不是255了
+			TopLeftY = 65535;
+			BottomRightX = 0;
+			BottomRightY = 0;
+			//break;
+		}	
+	}
+
+	return StrokeNo;
+}
